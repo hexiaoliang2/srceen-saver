@@ -2,15 +2,19 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "应用内屏保：全屏展示 · 保持亮屏 · 卡片自由布局"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "应用内屏保主入口"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "应用内屏保"
+    },
+    {
+      "name": "permission_reason_photo",
+      "value": "用于在相册卡片中展示你选择的照片"
     }
   ]
 }

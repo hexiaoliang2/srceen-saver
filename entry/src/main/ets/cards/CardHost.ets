@@ -1,24 +1,43 @@
-import { ScreenSaverClockCard } from './ClockCardView';
-import { ScreenSaverPhotoCard } from './PhotoCardView';
-import { ScreenSaverCardInstance, ScreenSaverCardMode } from '../model/ConfigModels';
+import { ScreensaverClockCard } from './ClockCardView';
+import { ScreensaverPhotoCard } from './PhotoCardView';
+import { ScreensaverVideoCard } from './VideoCardView';
+import { ScreensaverGitCard } from './GitCardView';
+import { ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
 
 @ComponentV2
-export struct ScreenSaverCardHost {
-  @Param card: ScreenSaverCardInstance = new ScreenSaverCardInstance();
-  @Param cardMode: ScreenSaverCardMode = 'play';
-  @Param pageIndex: number = 0;
+export struct ScreensaverCardHost {
+  @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
+  @Param cardMode: ScreensaverCardMode = 'play';
   @Param cardActive: boolean = true;
+  @Event onRequestConfig: () => void = (): void => {};
 
   build() {
     if (this.card.cardType === 'photo') {
-      ScreenSaverPhotoCard({
+      ScreensaverPhotoCard({
         card: this.card,
         cardMode: this.cardMode,
-        pageIndex: this.pageIndex,
         cardActive: this.cardActive
       })
+    } else if (this.card.cardType === 'video') {
+      ScreensaverVideoCard({
+        card: this.card,
+        cardMode: this.cardMode,
+        cardActive: this.cardActive,
+        onRequestConfig: (): void => {
+          this.onRequestConfig();
+        }
+      })
+    } else if (this.card.cardType === 'git') {
+      ScreensaverGitCard({
+        card: this.card,
+        cardMode: this.cardMode,
+        cardActive: this.cardActive,
+        onRequestConfig: (): void => {
+          this.onRequestConfig();
+        }
+      })
     } else {
-      ScreenSaverClockCard({
+      ScreensaverClockCard({
         card: this.card,
         cardMode: this.cardMode
       })

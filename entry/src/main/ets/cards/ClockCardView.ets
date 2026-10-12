@@ -1,21 +1,42 @@
 import { screenSaverTicker, ScreenSaverTickListener } from '../common/Ticker';
 import {
+  screenSaverFormatDate,
+  screenSaverFormatDateFull,
+  screenSaverFormatLunar,
+  screenSaverFormatLunarShort,
+  screenSaverFormatTime,
+  screenSaverFormatWeekdayFull,
+  ScreenSaverLunarParts,
+  ScreenSaverTimeParts
+} from '../common/DateFormats';
+import {
   SCREEN_SAVER_CLOCK_MAX_FONT,
   SCREEN_SAVER_CLOCK_MIN_FONT,
-  ScreenSaverCardInstance,
-  ScreenSaverCardMode
+  SCREEN_SAVER_CLOCK_SMALL_FONT,
+  ScreensaverCardInstance,
+  ScreensaverCardMode
 } from '../model/ConfigModels';
 
-const SCREEN_SAVER_WEEK_NAMES: string[] = ['日', '一', '二', '三', '四', '五', '六'];
+interface ScreenSaverClockFontPlan {
+  mainFont: number;
+  subFont: number;
+  mainText: string;
+  periodText: string;
+  subText: string;
+  secondText: string;
+}
 
 @ComponentV2
-export struct ScreenSaverClockCard {
-  @Param card: ScreenSaverCardInstance = new ScreenSaverCardInstance();
-  @Param cardMode: ScreenSaverCardMode = 'play';
+export struct ScreensaverClockCard {
+  @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
+  @Param cardMode: ScreensaverCardMode = 'play';
 
-  @Local timeText: string = '--:--';
+  @Local mainText: string = '--:--';
   @Local periodText: string = '';
-  @Local dateText: string = '';
+  @Local subText: string = '';
+  @Local secondText: string = '';
+  @Local mainFont: number = 40;
+  @Local subFont: number = 14;
   @Local cardW: number = 0;
   @Local cardH: number = 0;
 
@@ -24,7 +45,8 @@ export struct ScreenSaverClockCard {
       this.refreshTime();
     },
     needsSecondTick: (): boolean => {
-      return this.card.clock.showSeconds;
+      return this.card.clock.showSeconds && this.card.clock.format !== 'dateOnly' &&
+        this.card.clock.format !== 'lunar';
     }
   };
 
@@ -37,79 +59,151 @@ export struct ScreenSaverClockCard {
     screenSaverTicker.removeListener(this.tickListener);
   }
 
+  @Monitor('card.clock.format', 'card.clock.use24Hour', 'card.clock.showSeconds', 'card.clock.fontStep')
+  onClockConfigChanged(): void {
+    screenSaverTicker.reschedule();
+    this.refreshTime();
+  }
+
   private refreshTime(): void {
     const now = new Date();
-    const showSeconds = this.card.clock.showSeconds;
-    const use24Hour = this.card.clock.use24Hour;
-    let hours = now.getHours();
-    let period = '';
-    if (!use24Hour) {
-      period = hours >= 12 ? 'PM' : 'AM';
-      hours = hours % 12;
-      if (hours === 0) {
-        hours = 12;
-      }
-    }
-    const minutes = now.getMinutes().toString().padStart(2, '0');
-    let text = `${hours.toString().padStart(2, '0')}:${minutes}`;
-    if (showSeconds) {
-      text = `${text}:${now.getSeconds().toString().padStart(2, '0')}`;
-    }
-    this.timeText = text;
-    this.periodText = period;
-    if (this.card.clock.showDate) {
-      this.dateText = `${now.getMonth() + 1}月${now.getDate()}日 周${SCREEN_SAVER_WEEK_NAMES[now.getDay()]}`;
-    }
+    const plan = this.buildPlan(now);
+    this.mainText = plan.mainText;
+    this.periodText = plan.periodText;
+    this.subText = plan.subText;
+    this.secondText = plan.secondText;
+    this.mainFont = plan.mainFont;
+    this.subFont = plan.subFont;
   }
 
-  private timeFontSize(): number {
-    const width = this.cardW > 0 ? this.cardW : 120;
+  private fontStepFactor(): number {
+    if (this.card.clock.fontStep <= 0) {
+      return 0.85;
+    }
+    if (this.card.clock.fontStep >= 2) {
+      return 1.25;
+    }
+    return 1;
+  }
+
+  private buildPlan(now: Date): ScreenSaverClockFontPlan {
+    const format = this.card.clock.format;
+    const width = this.cardW > 0 ? this.cardW : 160;
     const height = this.cardH > 0 ? this.cardH : 80;
-    let charCount = this.card.clock.showSeconds ? 8 : 5;
-    if (!this.card.clock.use24Hour) {
-      charCount += 1.5;
+    const factor = this.fontStepFactor();
+    if (format === 'dateOnly') {
+      const main = screenSaverFormatDateFull(now);
+      const sub = screenSaverFormatWeekdayFull(now);
+      const mainFont = this.fitFont(width, height * 0.5, main.length, 0.6) * factor;
+      const plan: ScreenSaverClockFontPlan = {
+        mainFont: this.clampFont(mainFont),
+        subFont: this.clampFont(mainFont * 0.42),
+        mainText: main,
+        periodText: '',
+        subText: sub,
+        secondText: ''
+      };
+      return plan;
     }
-    const byWidth = (width * 0.9) / (0.6 * charCount);
-    const byHeight = height * 0.52;
-    const base = Math.min(byWidth, byHeight) * this.card.clock.fontScale;
-    return Math.max(SCREEN_SAVER_CLOCK_MIN_FONT, Math.min(base, SCREEN_SAVER_CLOCK_MAX_FONT));
+    if (format === 'lunar') {
+      const parts: ScreenSaverLunarParts = screenSaverFormatLunar(now);
+      const mainFont = this.fitFont(width, height * 0.5, parts.lunarLine.length, 0.62) * factor;
+      const plan: ScreenSaverClockFontPlan = {
+        mainFont: this.clampFont(mainFont),
+        subFont: this.clampFont(mainFont * 0.38),
+        mainText: parts.lunarLine,
+        periodText: '',
+        subText: parts.solarLine,
+        secondText: ''
+      };
+      return plan;
+    }
+    const timeParts: ScreenSaverTimeParts = screenSaverFormatTime(now, this.card.clock.use24Hour,
+      this.card.clock.showSeconds && this.card.rowSpan >= 2);
+    const charCount = timeParts.mainText.length + (timeParts.periodText.length > 0 ? 1.5 : 0);
+    const hasSubtitle = format === 'timeDate' && this.card.rowSpan >= 2;
+    const timeHeightShare = hasSubtitle ? 0.62 : 0.86;
+    let mainFont = this.fitFont(width, height * timeHeightShare, charCount, 0.62) * factor;
+    let subText = '';
+    if (hasSubtitle) {
+      const withWeekday = this.card.colSpan >= 4;
+      subText = `${screenSaverFormatDate(now, withWeekday)} · ${screenSaverFormatLunarShort(now)}`;
+    }
+    const plan: ScreenSaverClockFontPlan = {
+      mainFont: this.clampFont(mainFont),
+      subFont: this.clampFont(mainFont * 0.24, 10, 28),
+      mainText: timeParts.mainText,
+      periodText: timeParts.periodText,
+      subText: subText,
+      secondText: ''
+    };
+    return plan;
   }
 
-  private dateVisible(): boolean {
-    return this.card.clock.showDate && this.card.rowSpan >= 2;
+  private fitFont(width: number, height: number, charCount: number, widthRatio: number): number {
+    const usableChars = charCount > 0 ? charCount : 5;
+    const byWidth = (width * 0.9) / (widthRatio * usableChars);
+    const byHeight = height;
+    return Math.min(byWidth, byHeight);
+  }
+
+  private clampFont(value: number, min: number = SCREEN_SAVER_CLOCK_MIN_FONT,
+    max: number = SCREEN_SAVER_CLOCK_MAX_FONT): number {
+    const minimal = this.isMinimalSize() ? SCREEN_SAVER_CLOCK_SMALL_FONT : min;
+    if (value < minimal) {
+      return minimal;
+    }
+    if (value > max) {
+      return max;
+    }
+    return value;
+  }
+
+  private isMinimalSize(): boolean {
+    return this.card.colSpan * this.card.rowSpan < 4;
   }
 
   build() {
     Column() {
       Row({ space: 4 }) {
-        Text(this.timeText)
-          .fontSize(this.timeFontSize())
+        Text(this.mainText)
+          .fontSize(this.mainFont)
           .fontColor('#F2F2F2')
           .fontWeight(FontWeight.Medium)
           .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (this.periodText.length > 0) {
           Text(this.periodText)
-            .fontSize(this.timeFontSize() * 0.3)
+            .fontSize(Math.max(10, this.mainFont * 0.28))
             .fontColor('#B3B3B3')
             .maxLines(1)
         }
       }
       .alignItems(VerticalAlign.Bottom)
 
-      if (this.dateVisible()) {
-        Text(this.dateText)
-          .fontSize(Math.max(10, this.timeFontSize() * 0.28))
+      if (this.subText.length > 0) {
+        Text(this.subText)
+          .fontSize(this.subFont)
           .fontColor('#8C8C8C')
           .maxLines(1)
-          .margin({ top: 2 })
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4 })
+          .padding({ left: 2, right: 2 })
       }
     }
     .width('100%')
     .height('100%')
+    .padding({ left: 10, right: 10 })
     .justifyContent(FlexAlign.Center)
     .onAreaChange((oldArea: Area, newArea: Area): void => {
-      this.cardW = typeof newArea.width === 'number' ? newArea.width : 0;
-      this.cardH = typeof newArea.height === 'number' ? newArea.height : 0;
+      const width = typeof newArea.width === 'number' ? newArea.width : 0;
+      const height = typeof newArea.height === 'number' ? newArea.height : 0;
+      const changed = Math.abs(width - this.cardW) > 1 || Math.abs(height - this.cardH) > 1;
+      this.cardW = width;
+      this.cardH = height;
+      if (changed) {
+        this.refreshTime();
+      }
     })
   }
 }

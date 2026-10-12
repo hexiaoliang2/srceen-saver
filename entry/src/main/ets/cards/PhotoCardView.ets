@@ -2,33 +2,41 @@ import { image } from '@kit.ImageKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverDarkenHex, screenSaverImageLoader, screenSaverVpToPx } from '../common/ImageLoader';
 import { screenSaverTicker } from '../common/Ticker';
-import { screenSaverAppModel } from '../model/AppModel';
+import { screenSaverNetProbe } from '../common/NetProbe';
+import { screenSaverMediaAccess, screenSaverPhotoAccessFlag } from '../common/MediaAccess';
+import { screenSaverMotionDuration, SCREEN_SAVER_MOTION_PHOTO_FADE_MS } from '../common/Motion';
 import {
-  SCREEN_SAVER_AMBIENT_DARKEN_FACTOR,
-  ScreenSaverCardInstance,
-  ScreenSaverCardMode
+  SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
+  SCREEN_SAVER_PHOTO_RECENT_DEDUP,
+  ScreensaverCardInstance,
+  ScreensaverCardMode
 } from '../model/ConfigModels';
 
-const SCREEN_SAVER_FADE_DURATION_MS: number = 400;
 const SCREEN_SAVER_REFIT_DEBOUNCE_MS: number = 300;
 const SCREEN_SAVER_DEFERRED_RELEASE_MS: number = 100;
+const SCREEN_SAVER_PLACEHOLDER_NEUTRAL: string = '#1A1A1E';
+const SCREEN_SAVER_PLACEHOLDER_DARKEN: number = 0.45;
 
 @ComponentV2
-export struct ScreenSaverPhotoCard {
-  @Param card: ScreenSaverCardInstance = new ScreenSaverCardInstance();
-  @Param cardMode: ScreenSaverCardMode = 'play';
-  @Param pageIndex: number = 0;
+export struct ScreensaverPhotoCard {
+  @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
+  @Param cardMode: ScreensaverCardMode = 'play';
   @Param cardActive: boolean = true;
+  @Param manualAdvanceSeed: number = 0;
 
   @Local currentPixel: image.PixelMap | undefined = undefined;
   @Local incomingPixel: image.PixelMap | undefined = undefined;
   @Local fadeOpacity: number = 0;
   @Local placeholderVisible: boolean = true;
+  @Local placeholderColor: string = SCREEN_SAVER_PLACEHOLDER_NEUTRAL;
+  @Local infoText: string = '';
+  @Local deniedVisible: boolean = false;
+  @Local emptyVisible: boolean = false;
 
   private playList: string[] = [];
   private excludedUris: string[] = [];
-  private currentIndex: number = 0;
-  private nextIndex: number = -1;
+  private recentUris: string[] = [];
+  private cursor: number = 0;
   private generation: number = 0;
   private intervalTimer: number = -1;
   private refitTimer: number = -1;
@@ -39,6 +47,7 @@ export struct ScreenSaverPhotoCard {
 
   aboutToAppear(): void {
     this.buildPlayList();
+    this.syncEmptyStates();
   }
 
   aboutToDisappear(): void {
@@ -56,17 +65,64 @@ export struct ScreenSaverPhotoCard {
   @Monitor('card.photo.uris')
   onUrisChanged(): void {
     this.excludedUris = [];
+    this.recentUris = [];
+    this.syncEmptyStates();
     this.restartPipeline();
   }
 
-  @Monitor('card.photo.shuffle')
-  onShuffleChanged(): void {
+  @Monitor('card.photo.order')
+  onOrderChanged(): void {
+    this.recentUris = [];
     this.restartPipeline();
   }
 
   @Monitor('card.photo.intervalSec')
   onIntervalChanged(): void {
     this.restartTimer();
+  }
+
+  @Monitor('card.photo.showInfo')
+  onInfoChanged(): void {
+    this.updateInfoText();
+  }
+
+  @Monitor('cardActive', 'cardMode')
+  onActivityChanged(): void {
+    if (this.cardMode === 'play' && this.cardActive) {
+      this.restartTimer();
+    } else {
+      this.stopTimer();
+    }
+  }
+
+  @Monitor('manualAdvanceSeed')
+  onManualAdvance(): void {
+    if (this.cardMode !== 'edit' || this.playList.length <= 1 || !this.started) {
+      return;
+    }
+    void this.advanceNow();
+  }
+
+  private async advanceNow(): Promise<void> {
+    const targetPixel = this.incomingPixel;
+    const targetIndex = this.pendingNextIndex;
+    if (targetPixel !== undefined && targetIndex >= 0) {
+      this.retiringMap = this.currentPixel;
+      this.pendingNextIndex = -1;
+      this.completeFade(targetPixel, targetIndex);
+      this.releaseMapDeferred(this.retiringMap);
+      this.retiringMap = undefined;
+      return;
+    }
+    this.cursor = this.pickNextIndex();
+    const gen = this.generation;
+    await this.loadCurrent(gen, 0);
+  }
+
+  private syncEmptyStates(): void {
+    const hasUris = this.card.photo.uris.length > 0;
+    this.deniedVisible = !hasUris && this.card.photo.sourceAlbum !== 'all' && screenSaverPhotoAccessFlag.albumDenied;
+    this.emptyVisible = !hasUris && !this.deniedVisible;
   }
 
   private buildPlayList(): void {
@@ -77,16 +133,61 @@ export struct ScreenSaverPhotoCard {
         list.push(uri);
       }
     }
-    const useShuffle = this.card.photo.shuffle && this.cardMode === 'play';
-    if (useShuffle) {
-      for (let i = list.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        const temp = list[i];
-        list[i] = list[j];
-        list[j] = temp;
+    if (this.card.photo.order === 'shuffle' && this.cardMode === 'play') {
+      this.playList = list;
+    } else {
+      this.playList = list;
+    }
+    if (this.cursor >= this.playList.length) {
+      this.cursor = 0;
+    }
+  }
+
+  private pickNextIndex(): number {
+    if (this.playList.length === 0) {
+      return -1;
+    }
+    if (this.card.photo.order !== 'shuffle' || this.cardMode !== 'play') {
+      this.cursor = (this.cursor + 1) % this.playList.length;
+      return this.cursor;
+    }
+    if (this.recentUris.length >= SCREEN_SAVER_PHOTO_RECENT_DEDUP) {
+      this.recentUris.shift();
+    }
+    const candidates: number[] = [];
+    for (let index = 0; index < this.playList.length; index++) {
+      const uri = this.playList[index];
+      if (uri === this.playList[this.cursor] && this.playList.length > 1) {
+        continue;
+      }
+      if (this.recentUris.indexOf(uri) < 0) {
+        candidates.push(index);
       }
     }
-    this.playList = list;
+    if (candidates.length === 0) {
+      this.recentUris = [];
+      for (let index = 0; index < this.playList.length; index++) {
+        if (index !== this.cursor) {
+          candidates.push(index);
+        }
+      }
+      if (candidates.length === 0) {
+        return this.cursor;
+      }
+    }
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    this.cursor = pick;
+    return pick;
+  }
+
+  private noteRecent(uri: string): void {
+    if (this.recentUris.indexOf(uri) >= 0) {
+      return;
+    }
+    this.recentUris.push(uri);
+    if (this.recentUris.length > SCREEN_SAVER_PHOTO_RECENT_DEDUP) {
+      this.recentUris.shift();
+    }
   }
 
   private restartPipeline(): void {
@@ -97,13 +198,10 @@ export struct ScreenSaverPhotoCard {
     this.fadeOpacity = 0;
     this.buildPlayList();
     if (this.playList.length === 0) {
-      this.nextIndex = -1;
-      this.currentIndex = 0;
       const retire = this.currentPixel;
       this.currentPixel = undefined;
       this.releaseMapDeferred(retire);
       this.placeholderVisible = true;
-      screenSaverAppModel.resetAmbientColorIfNoDriver(this.pageIndex);
       return;
     }
     if (this.started) {
@@ -118,8 +216,7 @@ export struct ScreenSaverPhotoCard {
     const gen = this.generation;
     this.stopTimer();
     this.releaseIncoming();
-    this.currentIndex = 0;
-    this.nextIndex = -1;
+    this.cursor = 0;
     this.placeholderVisible = false;
     void this.loadCurrent(gen, 0);
     this.restartTimer();
@@ -134,10 +231,9 @@ export struct ScreenSaverPhotoCard {
       this.currentPixel = undefined;
       this.releaseMapDeferred(retire);
       this.placeholderVisible = true;
-      screenSaverAppModel.resetAmbientColorIfNoDriver(this.pageIndex);
       return;
     }
-    const uri = this.playList[this.currentIndex];
+    const uri = this.playList[this.cursor];
     const map = await this.decodeUri(uri);
     if (gen !== this.generation) {
       this.releaseMap(map);
@@ -145,7 +241,11 @@ export struct ScreenSaverPhotoCard {
     }
     if (map === undefined) {
       this.noteBroken(uri);
-      this.currentIndex = (this.currentIndex + 1) % this.playList.length;
+      const nextIndex = this.pickNextIndex();
+      if (nextIndex < 0 || nextIndex === this.cursor) {
+        this.placeholderVisible = true;
+        return;
+      }
       void this.loadCurrent(gen, attempt + 1);
       return;
     }
@@ -154,37 +254,12 @@ export struct ScreenSaverPhotoCard {
     this.releaseMapDeferred(retire);
     this.fadeOpacity = 0;
     this.placeholderVisible = false;
-    this.publishAmbient(map);
+    this.noteRecent(uri);
+    this.updateInfoText();
     void this.preloadNext(0);
   }
 
-  private async preloadNext(attempt: number): Promise<void> {
-    if (this.playList.length <= 1 || attempt >= this.playList.length) {
-      return;
-    }
-    const gen = this.generation;
-    const idx = (this.currentIndex + 1 + attempt) % this.playList.length;
-    if (idx === this.currentIndex) {
-      return;
-    }
-    const uri = this.playList[idx];
-    const map = await this.decodeUri(uri);
-    if (gen !== this.generation) {
-      this.releaseMap(map);
-      return;
-    }
-    if (map === undefined) {
-      this.noteBroken(uri);
-      void this.preloadNext(attempt + 1);
-      return;
-    }
-    const retire = this.incomingPixel;
-    this.incomingPixel = map;
-    this.nextIndex = idx;
-    this.releaseMapDeferred(retire);
-  }
-
-  private advance(): void {
+  private async advance(): Promise<void> {
     if (!this.cardActive || !screenSaverTicker.isActive()) {
       return;
     }
@@ -192,16 +267,25 @@ export struct ScreenSaverPhotoCard {
       return;
     }
     const targetPixel = this.incomingPixel;
-    const targetIndex = this.nextIndex;
+    const targetIndex = this.pendingNextIndex;
     if (targetPixel === undefined || targetIndex < 0) {
-      void this.preloadNext(0);
+      this.cursor = this.pickNextIndex();
+      const gen = this.generation;
+      void this.loadCurrent(gen, 0);
       return;
     }
     this.retiringMap = this.currentPixel;
-    this.nextIndex = -1;
+    this.pendingNextIndex = -1;
     const gen = this.generation;
+    const fadeMs = screenSaverMotionDuration(SCREEN_SAVER_MOTION_PHOTO_FADE_MS);
+    if (fadeMs <= 0) {
+      this.completeFade(targetPixel, targetIndex);
+      this.releaseMapDeferred(this.retiringMap);
+      this.retiringMap = undefined;
+      return;
+    }
     this.getUIContext().animateTo({
-      duration: SCREEN_SAVER_FADE_DURATION_MS,
+      duration: fadeMs,
       curve: Curve.EaseInOut,
       onFinish: (): void => {
         if (gen !== this.generation) {
@@ -214,16 +298,62 @@ export struct ScreenSaverPhotoCard {
     });
   }
 
+  private pendingNextIndex: number = -1;
+
+  private async preloadNext(attempt: number): Promise<void> {
+    if (this.playList.length <= 1 || attempt >= this.playList.length) {
+      return;
+    }
+    if (this.card.photo.wifiOnlyPrefetch) {
+      const metered = await screenSaverNetProbe.isMetered();
+      if (metered) {
+        return;
+      }
+    }
+    const gen = this.generation;
+    const index = this.pickNextIndex();
+    if (index < 0) {
+      return;
+    }
+    const uri = this.playList[index];
+    const map = await this.decodeUri(uri);
+    if (gen !== this.generation) {
+      this.releaseMap(map);
+      return;
+    }
+    if (map === undefined) {
+      this.noteBroken(uri);
+      void this.preloadNext(attempt + 1);
+      return;
+    }
+    const retire = this.incomingPixel;
+    this.incomingPixel = map;
+    this.pendingNextIndex = index;
+    this.releaseMapDeferred(retire);
+  }
+
   private completeFade(targetPixel: image.PixelMap, targetIndex: number): void {
     const retire = this.retiringMap;
     this.retiringMap = undefined;
     this.currentPixel = targetPixel;
-    this.currentIndex = targetIndex;
+    this.cursor = targetIndex;
     this.incomingPixel = undefined;
     this.fadeOpacity = 0;
     this.releaseMapDeferred(retire);
-    this.publishAmbient(targetPixel);
+    this.noteRecent(this.playList[targetIndex]);
+    this.updateInfoText();
     void this.preloadNext(0);
+  }
+
+  private updateInfoText(): void {
+    if (!this.card.photo.showInfo || this.playList.length === 0) {
+      this.infoText = '';
+      return;
+    }
+    const uri = this.playList[this.cursor];
+    const slash = uri.lastIndexOf('/');
+    const name = slash >= 0 ? uri.substring(slash + 1) : uri;
+    this.infoText = name.length > 40 ? `${name.substring(0, 40)}…` : name;
   }
 
   private scheduleRefit(): void {
@@ -245,7 +375,7 @@ export struct ScreenSaverPhotoCard {
   }
 
   private async reloadCurrent(gen: number): Promise<void> {
-    const uri = this.playList[this.currentIndex];
+    const uri = this.playList[this.cursor];
     const map = await this.decodeUri(uri);
     if (gen !== this.generation) {
       this.releaseMap(map);
@@ -258,7 +388,6 @@ export struct ScreenSaverPhotoCard {
     this.currentPixel = map;
     this.releaseMapDeferred(retire);
     this.placeholderVisible = false;
-    this.publishAmbient(map);
     void this.preloadNext(0);
   }
 
@@ -266,7 +395,14 @@ export struct ScreenSaverPhotoCard {
     if (this.excludedUris.indexOf(uri) >= 0) {
       return undefined;
     }
-    return await screenSaverImageLoader.decodeForRegion(uri, this.targetWidthPx(), this.targetHeightPx());
+    const map = await screenSaverImageLoader.decodeForRegion(uri, this.targetWidthPx(), this.targetHeightPx());
+    if (map !== undefined) {
+      const avg = await screenSaverImageLoader.extractMainColor(map);
+      if (avg !== undefined) {
+        this.placeholderColor = screenSaverDarkenHex(avg, SCREEN_SAVER_PLACEHOLDER_DARKEN);
+      }
+    }
+    return map;
   }
 
   private targetWidthPx(): number {
@@ -277,21 +413,6 @@ export struct ScreenSaverPhotoCard {
   private targetHeightPx(): number {
     const height = this.cardH > 0 ? this.cardH : 480;
     return screenSaverVpToPx(height);
-  }
-
-  private publishAmbient(map: image.PixelMap): void {
-    const pageIndex = this.pageIndex;
-    const cardId = this.card.id;
-    void this.publishAmbientAsync(map, pageIndex, cardId);
-  }
-
-  private async publishAmbientAsync(map: image.PixelMap, pageIndex: number, cardId: string): Promise<void> {
-    const hex = await screenSaverImageLoader.extractMainColor(map);
-    if (hex === undefined) {
-      return;
-    }
-    const darkened = screenSaverDarkenHex(hex, SCREEN_SAVER_AMBIENT_DARKEN_FACTOR);
-    screenSaverAppModel.setAmbientColor(pageIndex, cardId, darkened);
   }
 
   private noteBroken(uri: string): void {
@@ -306,9 +427,15 @@ export struct ScreenSaverPhotoCard {
     if (!this.started || this.playList.length <= 1) {
       return;
     }
-    const intervalMs = Math.max(5, this.card.photo.intervalSec) * 1000;
+    if (this.cardMode !== 'play' || !this.cardActive) {
+      return;
+    }
+    if (this.card.photo.intervalSec <= 0) {
+      return;
+    }
+    const intervalMs = Math.max(SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC, this.card.photo.intervalSec) * 1000;
     this.intervalTimer = setInterval((): void => {
-      this.advance();
+      void this.advance();
     }, intervalMs);
   }
 
@@ -329,7 +456,7 @@ export struct ScreenSaverPhotoCard {
   private releaseIncoming(): void {
     const map = this.incomingPixel;
     this.incomingPixel = undefined;
-    this.nextIndex = -1;
+    this.pendingNextIndex = -1;
     this.releaseMapDeferred(map);
   }
 
@@ -354,8 +481,20 @@ export struct ScreenSaverPhotoCard {
     }, SCREEN_SAVER_DEFERRED_RELEASE_MS);
   }
 
+  private async openPermissionSetting(): Promise<void> {
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return;
+    }
+    await screenSaverMediaAccess.openPermissionSetting(context);
+  }
+
   build() {
     Stack() {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.placeholderColor)
       if (this.currentPixel !== undefined) {
         Image(this.currentPixel)
           .width('100%')
@@ -369,20 +508,54 @@ export struct ScreenSaverPhotoCard {
           .objectFit(ImageFit.Cover)
           .opacity(this.fadeOpacity)
       }
-      if (this.placeholderVisible) {
-        Column() {
-          Text(this.cardMode === 'edit' ? '未选择照片' : '相册待设置')
+      if (this.placeholderVisible && !this.deniedVisible && !this.emptyVisible) {
+        Text('加载中…')
+          .fontSize(12)
+          .fontColor('#8C8C8C')
+      }
+      if (this.emptyVisible) {
+        Column({ space: 4 }) {
+          Text('还没有照片')
             .fontSize(13)
-            .fontColor('#5A5A5A')
+            .fontColor('#B3B3B3')
+          Text('在配置中选择相册来源')
+            .fontSize(11)
+            .fontColor('#6E6E73')
+        }
+      }
+      if (this.deniedVisible) {
+        Column({ space: 6 }) {
+          Text('无相册访问权限')
+            .fontSize(13)
+            .fontColor('#B3B3B3')
+          Text('去开启')
+            .fontSize(12)
+            .fontColor('#4A9EFF')
+            .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+            .borderRadius(6)
+            .backgroundColor('#26262B')
+            .onClick((): void => {
+              void this.openPermissionSetting();
+            })
+        }
+      }
+      if (this.infoText.length > 0) {
+        Row() {
+          Text(this.infoText)
+            .fontSize(10)
+            .fontColor('#D0D0D0')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
+        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+        .backgroundColor('#66000000')
+        .align(Alignment.BottomStart)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#0A0A0A')
+    .clip(true)
     .onAreaChange((oldArea: Area, newArea: Area): void => {
       const width = typeof newArea.width === 'number' ? newArea.width : 0;
       const height = typeof newArea.height === 'number' ? newArea.height : 0;
@@ -400,6 +573,7 @@ export struct ScreenSaverPhotoCard {
       } else if (sizeChanged && this.playList.length > 0) {
         this.scheduleRefit();
       }
+      this.syncEmptyStates();
     })
   }
 }

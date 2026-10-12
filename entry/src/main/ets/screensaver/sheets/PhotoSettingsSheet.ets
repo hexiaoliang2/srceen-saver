@@ -1,19 +1,28 @@
-import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
-import { ScreenSaverGlowButton } from '../../common/GlowButton';
+import {
+  ScreenSaverChip,
+  ScreenSaverDeleteCardRow,
+  ScreenSaverSheetHeader,
+  ScreenSaverToggleRow
+} from '../../common/SheetParts';
+import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
-import { ScreenSaverCardInstance, ScreenSaverNumberOption } from '../../model/ConfigModels';
+import { ScreensaverPhotoCard } from '../../cards/PhotoCardView';
+import {
+  SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS,
+  ScreensaverCardInstance,
+  ScreensaverNumberOption
+} from '../../model/ConfigModels';
+import {
+  screenSaverMediaAccess,
+  screenSaverPhotoAccessFlag,
+  ScreenSaverAlbumEntry
+} from '../../common/MediaAccess';
 
-const SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS: ScreenSaverNumberOption[] = [
-  { value: 10, label: '10 秒' },
-  { value: 30, label: '30 秒' },
-  { value: 60, label: '1 分钟' },
-  { value: 300, label: '5 分钟' }
-];
-
-const SCREEN_SAVER_SAMPLE_PHOTO_NAMES: string[] = [
+const ALBUM_ALL_KEY: string = 'all';
+const SAMPLE_PHOTO_NAMES: string[] = [
   'photo_landscape_4k.jpg',
   'photo_portrait.jpg',
   'photo_square.jpg',
@@ -21,83 +30,185 @@ const SCREEN_SAVER_SAMPLE_PHOTO_NAMES: string[] = [
   'photo_dark.jpg',
   'photo_wide.jpg'
 ];
+const SAMPLE_PHOTO_DIR: string = 'sample_photos';
 
-const SCREEN_SAVER_SAMPLE_PHOTO_DIR: string = 'sample_photos';
+interface PhotoOrderOption {
+  value: string;
+  label: string;
+}
+
+const ORDER_OPTIONS: PhotoOrderOption[] = [
+  { value: 'shuffle', label: '随机' },
+  { value: 'time', label: '时间序' }
+];
 
 @ComponentV2
 export struct ScreenSaverPhotoSettingsPanel {
-  @Param card: ScreenSaverCardInstance = new ScreenSaverCardInstance();
+  @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
   @Event onDone: () => void = (): void => {};
-  @Local sampleBusy: boolean = false;
+  @Event onDelete: () => void = (): void => {};
+
+  @Local albumPanelVisible: boolean = false;
+  @Local albumEntries: ScreenSaverAlbumEntry[] = [];
+  @Local albumsLoaded: boolean = false;
+  @Local busy: boolean = false;
+  @Local statusText: string = '';
+  @Local previewSeed: number = 0;
+
+  private uiContext(): common.UIAbilityContext | undefined {
+    return this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+  }
 
   private async pickPhotos(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    this.busy = true;
+    this.statusText = '';
     try {
-      const options = new photoAccessHelper.PhotoSelectOptions();
-      options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
-      options.maxSelectNumber = 50;
-      const picker = new photoAccessHelper.PhotoViewPicker();
-      const result = await picker.select(options);
-      if (result.photoUris.length > 0) {
-        this.card.photo.uris = result.photoUris;
+      const uris = await screenSaverMediaAccess.pickImages(50);
+      if (uris.length > 0) {
+        this.card.photo.uris = uris;
+        this.card.photo.sourceAlbum = ALBUM_ALL_KEY;
         screenSaverAppModel.save();
+        this.statusText = `已选择 ${uris.length} 张照片`;
       }
-    } catch (err) {
-      const error = err as BusinessError;
-      ScreenSaverLogger.error(`pick photos failed: code=${error.code}, message=${error.message}`);
+    } finally {
+      this.busy = false;
     }
   }
 
   private async useSamplePhotos(): Promise<void> {
-    if (this.sampleBusy) {
+    if (this.busy) {
       return;
     }
-    this.sampleBusy = true;
+    this.busy = true;
+    this.statusText = '';
     try {
-      const context = this.getUIContext().getHostContext();
+      const context = this.uiContext();
       if (context === undefined) {
         return;
       }
-      const sampleDir = `${context.filesDir}/${SCREEN_SAVER_SAMPLE_PHOTO_DIR}`;
-      try {
-        fileIo.mkdirSync(sampleDir);
-      } catch (mkdirError) {
-        ScreenSaverLogger.info('sample photo dir already ready');
+      const sampleDir = `${context.filesDir}/${SAMPLE_PHOTO_DIR}`;
+      const existingUris = await this.ensureSamplePhotos(context, sampleDir);
+      if (existingUris.length > 0) {
+        this.card.photo.uris = existingUris;
+        this.card.photo.sourceAlbum = ALBUM_ALL_KEY;
+        screenSaverAppModel.save();
+        this.statusText = `已添加 ${existingUris.length} 张示例图片`;
       }
-      const paths: string[] = [];
-      for (const name of SCREEN_SAVER_SAMPLE_PHOTO_NAMES) {
-        const targetPath = `${sampleDir}/${name}`;
-        let exists = false;
-        try {
-          exists = fileIo.accessSync(targetPath);
-        } catch (accessError) {
-          exists = false;
-        }
-        if (!exists) {
-          const content = await context.resourceManager.getRawFileContent(`${SCREEN_SAVER_SAMPLE_PHOTO_DIR}/${name}`);
-          const file = fileIo.openSync(targetPath, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
-          try {
-            fileIo.writeSync(file.fd, content.buffer as ArrayBuffer);
-          } finally {
-            fileIo.closeSync(file);
-          }
-        }
-        paths.push(targetPath);
-      }
-      this.card.photo.uris = paths;
-      screenSaverAppModel.save();
-      this.toast(`已添加 ${paths.length} 张示例图片`);
-    } catch (err) {
-      const error = err as Error;
-      ScreenSaverLogger.error(`use sample photos failed: ${error.message}`);
-      this.toast('示例图片添加失败，请查看日志');
     } finally {
-      this.sampleBusy = false;
+      this.busy = false;
     }
+  }
+
+  private async ensureSamplePhotos(context: common.UIAbilityContext, sampleDir: string): Promise<string[]> {
+    try {
+      fileIo.mkdirSync(sampleDir);
+    } catch (mkdirError) {
+      ScreenSaverLogger.info('sample photo dir already ready');
+    }
+    const paths: string[] = [];
+    for (const name of SAMPLE_PHOTO_NAMES) {
+      const targetPath = `${sampleDir}/${name}`;
+      let exists = false;
+      try {
+        exists = fileIo.accessSync(targetPath);
+      } catch (accessError) {
+        exists = false;
+      }
+      if (!exists) {
+        const content = await context.resourceManager.getRawFileContent(`${SAMPLE_PHOTO_DIR}/${name}`);
+        const file = fileIo.openSync(targetPath, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
+        try {
+          fileIo.writeSync(file.fd, content.buffer as ArrayBuffer);
+        } finally {
+          fileIo.closeSync(file);
+        }
+      }
+      paths.push(targetPath);
+    }
+    return paths;
   }
 
   private clearPhotos(): void {
     this.card.photo.uris = [];
     screenSaverAppModel.save();
+    this.statusText = '已清空照片';
+  }
+
+  private async loadAlbums(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    this.busy = true;
+    try {
+      const context = this.uiContext();
+      if (context === undefined) {
+        return;
+      }
+      const granted = await screenSaverMediaAccess.requestPhotoPermission(context);
+      if (!granted) {
+        screenSaverPhotoAccessFlag.albumDenied = true;
+        this.statusText = '未获得相册访问权限';
+        return;
+      }
+      screenSaverPhotoAccessFlag.albumDenied = false;
+      const entries = await screenSaverMediaAccess.listAlbums(context);
+      this.albumEntries = entries;
+      this.albumsLoaded = true;
+      this.statusText = entries.length > 0 ? '' : '未发现可用相册，可使用「从图库选择照片」';
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async selectAlbum(key: string): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    this.busy = true;
+    this.statusText = '正在读取相册…';
+    try {
+      const context = this.uiContext();
+      if (context === undefined) {
+        return;
+      }
+      const uris = await screenSaverMediaAccess.fetchAlbumImageUris(context, key);
+      if (uris.length === 0) {
+        this.statusText = '该相册为空或读取失败';
+        return;
+      }
+      this.card.photo.uris = uris;
+      this.card.photo.sourceAlbum = key;
+      screenSaverAppModel.save();
+      this.statusText = `已载入 ${uris.length} 张照片`;
+      this.albumPanelVisible = false;
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async openPermissionSetting(): Promise<void> {
+    const context = this.uiContext();
+    if (context === undefined) {
+      return;
+    }
+    await screenSaverMediaAccess.openPermissionSetting(context);
+  }
+
+  private albumLabel(): string {
+    const key = this.card.photo.sourceAlbum;
+    if (key === ALBUM_ALL_KEY) {
+      return '全部照片';
+    }
+    if (key === 'favorite') {
+      return '收藏';
+    }
+    if (key.startsWith('user:')) {
+      return key.substring(5);
+    }
+    return key;
   }
 
   private toast(message: string): void {
@@ -105,42 +216,175 @@ export struct ScreenSaverPhotoSettingsPanel {
       this.getUIContext().getPromptAction().showToast({ message: message, duration: 1500 });
     } catch (err) {
       const error = err as Error;
-      ScreenSaverLogger.warn(`showToast failed: ${error.message}`);
+      ScreenSaverLogger.warn(`toast failed: ${error.message}`);
     }
   }
 
-  build() {
+  @Builder
+  albumSourcePanel() {
     Column({ space: 10 }) {
       Row() {
-        Text('相册设置')
+        Text('选择相册')
           .fontSize(15)
-          .fontColor('#F2F2F2')
+          .fontColor(SCREEN_SAVER_COLORS.textPrimary)
         Blank()
-        ScreenSaverGlowButton({
-          label: '完成',
-          textColor: '#8AB4F8',
-          fontSize: 13,
-          btnHeight: 28,
-          hPadding: 12,
-          onTap: (): void => {
-            this.onDone();
-          }
-        })
+        Text('返回')
+          .fontSize(13)
+          .fontColor(SCREEN_SAVER_COLORS.accent)
+          .padding({ left: 10, right: 2, top: 4, bottom: 4 })
+          .onClick((): void => {
+            this.albumPanelVisible = false;
+          })
       }
       .width('100%')
 
+      Column({ space: 8 }) {
+        Row() {
+          Text('全部照片')
+            .fontSize(14)
+            .fontColor(this.card.photo.sourceAlbum === ALBUM_ALL_KEY ? SCREEN_SAVER_COLORS.accent : '#CCCCCC')
+          Blank()
+          if (this.card.photo.sourceAlbum === ALBUM_ALL_KEY) {
+            Text('当前')
+              .fontSize(11)
+              .fontColor(SCREEN_SAVER_COLORS.success)
+          }
+        }
+        .width('100%')
+        .padding({ top: 8, bottom: 8 })
+        .onClick((): void => {
+          void this.selectAlbum(ALBUM_ALL_KEY);
+        })
+
+        ForEach(this.albumEntries, (entry: ScreenSaverAlbumEntry) => {
+          Row() {
+            Text(entry.name)
+              .fontSize(14)
+              .fontColor(this.card.photo.sourceAlbum === entry.key ?
+              SCREEN_SAVER_COLORS.accent : '#CCCCCC')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Blank()
+            if (this.card.photo.sourceAlbum === entry.key) {
+              Text('当前')
+                .fontSize(11)
+                .fontColor(SCREEN_SAVER_COLORS.success)
+            }
+          }
+          .width('100%')
+          .padding({ top: 8, bottom: 8 })
+          .onClick((): void => {
+            void this.selectAlbum(entry.key);
+          })
+        }, (entry: ScreenSaverAlbumEntry): string => entry.key)
+
+        Row() {
+          Text('新建相册…')
+            .fontSize(13)
+            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+        }
+        .width('100%')
+        .padding({ top: 8, bottom: 8 })
+        .onClick((): void => {
+          this.toast('请在系统图库中新建相册后再回到这里选择');
+        })
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+      .borderRadius(8)
+      .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
+
+      if (!this.albumsLoaded) {
+        Text('浏览系统相册需要相册读取权限；也可以直接使用「从图库选择照片」，无需授权')
+          .fontSize(11)
+          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+          .width('100%')
+        Row({ space: 8 }) {
+          ScreenSaverChip({
+            label: this.busy ? '加载中…' : '加载相册列表（需授权）',
+            onTap: (): void => {
+              void this.loadAlbums();
+            }
+          })
+          if (screenSaverPhotoAccessFlag.albumDenied) {
+            ScreenSaverChip({
+              label: '去开启权限',
+              onTap: (): void => {
+                void this.openPermissionSetting();
+              }
+            })
+          }
+        }
+        .width('100%')
+      }
+
+      if (this.statusText.length > 0) {
+        Text(this.statusText)
+          .fontSize(12)
+          .fontColor(SCREEN_SAVER_COLORS.textSecondary)
+          .width('100%')
+      }
+    }
+    .width('100%')
+    .padding(16)
+  }
+
+  @Builder
+  mainPanel() {
+    Column({ space: 12 }) {
+      ScreenSaverSheetHeader({
+        title: '相册卡片',
+        onDone: (): void => {
+          this.onDone();
+        }
+      })
+
+      Column() {
+        ScreensaverPhotoCard({
+          card: this.card,
+          cardMode: 'edit',
+          cardActive: false,
+          manualAdvanceSeed: this.previewSeed
+        })
+      }
+      .width('100%')
+      .height(140)
+      .borderRadius(8)
+      .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
+      .clip(true)
+      .onClick((): void => {
+        this.previewSeed++;
+      })
+
       Row() {
-        Text(`已选 ${this.card.photo.uris.length} 张照片`)
+        Text('来源相册')
           .fontSize(14)
           .fontColor('#CCCCCC')
         Blank()
-        ScreenSaverGlowButton({
+        Text(this.albumLabel())
+          .fontSize(13)
+          .fontColor(SCREEN_SAVER_COLORS.accent)
+          .onClick((): void => {
+            this.albumPanelVisible = true;
+          })
+      }
+      .width('100%')
+
+      Row({ space: 8 }) {
+        ScreenSaverChip({
+          label: this.busy ? '请稍候…' : '从图库选择照片',
+          onTap: (): void => {
+            void this.pickPhotos();
+          }
+        })
+        ScreenSaverChip({
+          label: '示例图片（6 张）',
+          onTap: (): void => {
+            void this.useSamplePhotos();
+          }
+        })
+        ScreenSaverChip({
           label: '清空',
-          textColor: '#E6A6A6',
-          glowColor: '#E67A7A',
-          fontSize: 13,
-          btnHeight: 28,
-          hPadding: 12,
           onTap: (): void => {
             this.clearPhotos();
           }
@@ -148,78 +392,111 @@ export struct ScreenSaverPhotoSettingsPanel {
       }
       .width('100%')
 
-      ScreenSaverGlowButton({
-        label: '从图库选择照片',
-        textColor: '#FFFFFF',
-        baseColor: '#3D6FBF',
-        glowColor: '#5B87D9',
-        fontSize: 14,
-        btnHeight: 40,
-        hPadding: 24,
-        fullWidth: true,
-        onTap: (): void => {
-          void this.pickPhotos();
+      Row() {
+        Text(`已选 ${this.card.photo.uris.length} 张`)
+          .fontSize(12)
+          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+        Blank()
+        if (this.statusText.length > 0) {
+          Text(this.statusText)
+            .fontSize(12)
+            .fontColor(SCREEN_SAVER_COLORS.textSecondary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+      }
+      .width('100%')
+
+      ScreenSaverToggleRow({
+        label: '自动轮播',
+        tip: '间隔下限 15s，关闭后仅手动切换',
+        isOn: this.card.photo.intervalSec > 0,
+        onChange: (value: boolean): void => {
+          this.card.photo.intervalSec = value ? Math.max(15, screenSaverAppModel.layout.settings.defaultIntervalSec) : 0;
+          screenSaverAppModel.save();
         }
       })
 
-      ScreenSaverGlowButton({
-        label: '使用示例图片（6 张）',
-        textColor: '#8AB4F8',
-        baseColor: '#26262B',
-        glowColor: '#4A9EFF',
-        fontSize: 14,
-        btnHeight: 40,
-        hPadding: 24,
-        fullWidth: true,
-        onTap: (): void => {
-          void this.useSamplePhotos();
+      if (this.card.photo.intervalSec > 0) {
+        Row() {
+          Text('切换间隔')
+            .fontSize(14)
+            .fontColor('#CCCCCC')
+          Blank()
+          Row({ space: 8 }) {
+            ForEach(SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS, (seconds: number) => {
+              ScreenSaverChip({
+                label: `${seconds}s`,
+                selected: this.card.photo.intervalSec === seconds,
+                onTap: (): void => {
+                  this.card.photo.intervalSec = seconds;
+                  screenSaverAppModel.save();
+                }
+              })
+            }, (seconds: number): string => `interval_${seconds}`)
+          }
         }
-      })
-
-      Text('示例图片内置在应用内（含横/竖/方形/低分辨率/宽幅），用于快速体验轮播、画质与环境色效果')
-        .fontSize(11)
-        .fontColor('#777777')
         .width('100%')
+      }
 
       Row() {
-        Text('轮播间隔')
+        Text('播放顺序')
           .fontSize(14)
           .fontColor('#CCCCCC')
         Blank()
-        ForEach(SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS, (option: ScreenSaverNumberOption) => {
-          ScreenSaverGlowButton({
-            label: option.label,
-            textColor: this.card.photo.intervalSec === option.value ? '#FFFFFF' : '#BBBBBB',
-            baseColor: this.card.photo.intervalSec === option.value ? '#3D6FBF' : '#26262B',
-            glowColor: '#4A9EFF',
-            fontSize: 12,
-            btnHeight: 28,
-            hPadding: 10,
-            marginLeft: 6,
-            onTap: (): void => {
-              this.card.photo.intervalSec = option.value;
-              screenSaverAppModel.save();
-            }
-          })
-        }, (option: ScreenSaverNumberOption): string => option.label)
+        Row({ space: 8 }) {
+          ForEach(ORDER_OPTIONS, (option: PhotoOrderOption) => {
+            ScreenSaverChip({
+              label: option.label,
+              selected: this.card.photo.order === option.value,
+              onTap: (): void => {
+                this.card.photo.order = option.value === 'shuffle' ? 'shuffle' : 'time';
+                screenSaverAppModel.save();
+              }
+            })
+          }, (option: PhotoOrderOption): string => option.value)
+        }
       }
       .width('100%')
 
-      Row() {
-        Text('随机播放')
-          .fontSize(14)
-          .fontColor('#CCCCCC')
-        Blank()
-        Toggle({ type: ToggleType.Switch, isOn: this.card.photo.shuffle })
-          .selectedColor('#3D6FBF')
-          .onChange((isOn: boolean): void => {
-            this.card.photo.shuffle = isOn;
-            screenSaverAppModel.save();
-          })
-      }
-      .width('100%')
+      ScreenSaverToggleRow({
+        label: '信息显示',
+        tip: '显示文件名',
+        isOn: this.card.photo.showInfo,
+        onChange: (value: boolean): void => {
+          this.card.photo.showInfo = value;
+          screenSaverAppModel.save();
+        }
+      })
+
+      ScreenSaverToggleRow({
+        label: '仅 Wi-Fi 下预取',
+        tip: '大相册建议开启',
+        isOn: this.card.photo.wifiOnlyPrefetch,
+        onChange: (value: boolean): void => {
+          this.card.photo.wifiOnlyPrefetch = value;
+          screenSaverAppModel.save();
+        }
+      })
+
+      ScreenSaverDeleteCardRow({
+        onDelete: (): void => {
+          this.onDelete();
+        }
+      })
     }
     .width('100%')
     .padding(16)
+  }
+
+  build() {
+    Column() {
+      if (this.albumPanelVisible) {
+        this.albumSourcePanel()
+      } else {
+        this.mainPanel()
+      }
+    }
+    .width('100%')
   }
 }

@@ -7,16 +7,18 @@ const SCREEN_SAVER_SYSTEM_BARS: Array<'status' | 'navigation'> = ['status', 'nav
 class ScreenSaverWindowController {
   private mainWindow: window.Window | undefined = undefined;
 
-  async enter(context: common.Context): Promise<void> {
+  async enter(context: common.Context, keepScreenOn: boolean): Promise<void> {
     const target = await this.getWindow(context);
     if (target === undefined) {
       return;
     }
     await this.safeCall((): Promise<void> => target.setWindowLayoutFullScreen(true), 'setWindowLayoutFullScreen(true)');
     await this.safeCall((): Promise<void> => target.setWindowSystemBarEnable([]), 'setWindowSystemBarEnable([])');
-    await this.safeCall((): Promise<void> => target.setWindowKeepScreenOn(true), 'setWindowKeepScreenOn(true)');
+    if (keepScreenOn) {
+      await this.safeCall((): Promise<void> => target.setWindowKeepScreenOn(true), 'setWindowKeepScreenOn(true)');
+    }
     await this.safeCall((): Promise<void> => target.setWindowBrightness(-1), 'setWindowBrightness(-1)');
-    ScreenSaverLogger.info('window enter: immersive + keep screen on');
+    ScreenSaverLogger.info(`window enter: immersive, keepScreenOn=${keepScreenOn}`);
   }
 
   async exit(context: common.Context): Promise<void> {
