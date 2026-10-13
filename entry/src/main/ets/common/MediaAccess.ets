@@ -10,6 +10,12 @@ const SCREEN_SAVER_ALBUM_FETCH_LIMIT: number = 2000;
 export interface ScreenSaverAlbumEntry {
   key: string;
   name: string;
+  count: number;
+}
+
+export interface ScreenSaverPhotoEntry {
+  uri: string;
+  dateTaken: string;
 }
 
 @ObservedV2
@@ -93,7 +99,8 @@ class ScreenSaverMediaAccessService {
         photoAccessHelper.AlbumSubtype.FAVORITE);
       const favoriteAlbums = await favoriteResult.getAllObjects();
       if (favoriteAlbums.length > 0) {
-        const favoriteEntry: ScreenSaverAlbumEntry = { key: 'favorite', name: '收藏' };
+        const favoriteCount = await this.countAlbumAssets(favoriteAlbums[0]);
+        const favoriteEntry: ScreenSaverAlbumEntry = { key: 'favorite', name: '收藏', count: favoriteCount };
         entries.push(favoriteEntry);
       }
       const userResult = await helper.getAlbums(photoAccessHelper.AlbumType.USER,
@@ -103,7 +110,8 @@ class ScreenSaverMediaAccessService {
         if (album.albumName.length === 0) {
           continue;
         }
-        const entry: ScreenSaverAlbumEntry = { key: `user:${album.albumName}`, name: album.albumName };
+        const count = await this.countAlbumAssets(album);
+        const entry: ScreenSaverAlbumEntry = { key: `user:${album.albumName}`, name: album.albumName, count: count };
         entries.push(entry);
       }
     } catch (err) {
@@ -113,27 +121,54 @@ class ScreenSaverMediaAccessService {
     return entries;
   }
 
-  async fetchAlbumImageUris(context: common.Context, albumKey: string): Promise<string[]> {
+  async countAllAssets(context: common.Context): Promise<number> {
     try {
       const helper = photoAccessHelper.getPhotoAccessHelper(context);
-      const uris: string[] = [];
+      const result = await helper.getAssets(this.buildFetchOptions());
+      const count = result.getCount();
+      result.close();
+      return count;
+    } catch (err) {
+      const error = err as BusinessError;
+      ScreenSaverLogger.warn(`count all assets failed: code=${error.code}, message=${error.message}`);
+      return -1;
+    }
+  }
+
+  private async countAlbumAssets(album: photoAccessHelper.Album): Promise<number> {
+    try {
+      const result = await album.getAssets(this.buildFetchOptions());
+      const count = result.getCount();
+      result.close();
+      return count;
+    } catch (err) {
+      const error = err as BusinessError;
+      ScreenSaverLogger.warn(`count album assets failed: code=${error.code}, message=${error.message}`);
+      return -1;
+    }
+  }
+
+  async fetchAlbumImageEntries(context: common.Context, albumKey: string): Promise<ScreenSaverPhotoEntry[]> {
+    try {
+      const helper = photoAccessHelper.getPhotoAccessHelper(context);
+      const entries: ScreenSaverPhotoEntry[] = [];
       if (albumKey.startsWith('user:')) {
         const album = await this.findUserAlbum(context, albumKey.substring(5));
         if (album !== undefined) {
-          await this.collectAlbumAssets(album, uris);
+          await this.collectAlbumAssets(album, entries);
         }
       } else if (albumKey === 'favorite') {
         const favoriteResult = await helper.getAlbums(photoAccessHelper.AlbumType.SYSTEM,
           photoAccessHelper.AlbumSubtype.FAVORITE);
         const favoriteAlbums = await favoriteResult.getAllObjects();
         if (favoriteAlbums.length > 0) {
-          await this.collectAlbumAssets(favoriteAlbums[0], uris);
+          await this.collectAlbumAssets(favoriteAlbums[0], entries);
         }
       } else {
-        await this.collectAllAssets(helper, uris);
+        await this.collectAllAssets(helper, entries);
       }
-      ScreenSaverLogger.info(`album ${albumKey} fetched ${uris.length} images`);
-      return uris;
+      ScreenSaverLogger.info(`album ${albumKey} fetched ${entries.length} images`);
+      return entries;
     } catch (err) {
       const error = err as BusinessError;
       ScreenSaverLogger.error(`fetch album images failed: code=${error.code}, message=${error.message}`);
@@ -157,36 +192,50 @@ class ScreenSaverMediaAccessService {
   private buildFetchOptions(): photoAccessHelper.FetchOptions {
     const predicates = new dataSharePredicates.DataSharePredicates();
     const options: photoAccessHelper.FetchOptions = {
-      fetchColumns: [photoAccessHelper.PhotoKeys.URI, photoAccessHelper.PhotoKeys.PHOTO_TYPE],
+      fetchColumns: [
+        photoAccessHelper.PhotoKeys.URI,
+        photoAccessHelper.PhotoKeys.PHOTO_TYPE,
+        photoAccessHelper.PhotoKeys.DATE_ADDED
+      ],
       predicates: predicates
     };
     return options;
   }
 
-  private async collectAlbumAssets(album: photoAccessHelper.Album, uris: string[]): Promise<void> {
+  private async collectAlbumAssets(album: photoAccessHelper.Album, entries: ScreenSaverPhotoEntry[]): Promise<void> {
     const result = await album.getAssets(this.buildFetchOptions());
     const assets = await result.getAllObjects();
-    this.appendImageUris(assets, uris);
+    this.appendImageEntries(assets, entries);
   }
 
-  private async collectAllAssets(helper: photoAccessHelper.PhotoAccessHelper, uris: string[]): Promise<void> {
+  private async collectAllAssets(helper: photoAccessHelper.PhotoAccessHelper,
+    entries: ScreenSaverPhotoEntry[]): Promise<void> {
     const result = await helper.getAssets(this.buildFetchOptions());
     const assets = await result.getAllObjects();
-    this.appendImageUris(assets, uris);
+    this.appendImageEntries(assets, entries);
   }
 
-  private appendImageUris(assets: photoAccessHelper.PhotoAsset[], uris: string[]): void {
+  private appendImageEntries(assets: photoAccessHelper.PhotoAsset[], entries: ScreenSaverPhotoEntry[]): void {
     for (const asset of assets) {
-      if (uris.length >= SCREEN_SAVER_ALBUM_FETCH_LIMIT) {
+      if (entries.length >= SCREEN_SAVER_ALBUM_FETCH_LIMIT) {
         return;
       }
       if (asset.photoType !== photoAccessHelper.PhotoType.IMAGE) {
         continue;
       }
       const uri = asset.uri;
-      if (uri.length > 0) {
-        uris.push(uri);
+      if (uri.length === 0) {
+        continue;
       }
+      let dateTaken = '';
+      try {
+        const rawDate = asset.get(photoAccessHelper.PhotoKeys.DATE_ADDED);
+        dateTaken = typeof rawDate === 'string' ? rawDate : `${rawDate}`;
+      } catch (dateError) {
+        dateTaken = '';
+      }
+      const entry: ScreenSaverPhotoEntry = { uri: uri, dateTaken: dateTaken };
+      entries.push(entry);
     }
   }
 }

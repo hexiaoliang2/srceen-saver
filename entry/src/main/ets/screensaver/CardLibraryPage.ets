@@ -9,6 +9,11 @@ export struct ScreenSaverCardLibraryPage {
   @Param navStack: NavPathStack = new NavPathStack();
 
   private addCard(meta: ScreensaverCardMeta): void {
+    const reason = screenSaverAppModel.cardAddBlockedReason(meta.cardType);
+    if (reason.length > 0) {
+      this.toast(reason);
+      return;
+    }
     const added = screenSaverAppModel.addCard(meta.cardType);
     ScreenSaverLogger.info(`library add ${meta.cardType}: ${added}`);
     if (!added) {
@@ -18,10 +23,17 @@ export struct ScreenSaverCardLibraryPage {
     this.toast(`已添加${meta.displayName}卡片`);
   }
 
+  private uniqueAdded(meta: ScreensaverCardMeta): boolean {
+    return meta.unique && screenSaverAppModel.cardsOfType(meta.cardType).length > 0;
+  }
+
   private countOf(meta: ScreensaverCardMeta): string {
     const count = screenSaverAppModel.cardsOfType(meta.cardType).length;
     if (count === 0) {
       return `${meta.defaultColSpan}×${meta.defaultRowSpan} · 未添加`;
+    }
+    if (meta.unique) {
+      return '已添加';
     }
     return `已添加 ×${count}`;
   }
@@ -81,15 +93,24 @@ export struct ScreenSaverCardLibraryPage {
                 }
                 .alignItems(HorizontalAlign.Start)
                 .layoutWeight(1)
-                Text('添加')
-                  .fontSize(13)
-                  .fontColor(SCREEN_SAVER_COLORS.white)
-                  .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-                  .borderRadius(8)
-                  .backgroundColor(SCREEN_SAVER_COLORS.accentStrong)
-                  .onClick((): void => {
-                    this.addCard(meta);
-                  })
+                if (this.uniqueAdded(meta)) {
+                  Text('已添加')
+                    .fontSize(13)
+                    .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                    .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+                    .borderRadius(8)
+                    .backgroundColor(SCREEN_SAVER_COLORS.divider)
+                } else {
+                  Text('添加')
+                    .fontSize(13)
+                    .fontColor(SCREEN_SAVER_COLORS.white)
+                    .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+                    .borderRadius(8)
+                    .backgroundColor(SCREEN_SAVER_COLORS.accentStrong)
+                    .onClick((): void => {
+                      this.addCard(meta);
+                    })
+                }
               }
               .width('100%')
               .padding(14)
@@ -102,7 +123,7 @@ export struct ScreenSaverCardLibraryPage {
         .layoutWeight(1)
         .padding({ left: 16, right: 16 })
 
-        Text('添加后可在编辑模式调整位置与尺寸')
+        Text('时钟 / Git 最多添加一张，相册 / 视频可添加多张 · 添加后在编辑模式调整位置与尺寸')
           .fontSize(11)
           .fontColor(SCREEN_SAVER_COLORS.textTertiary)
           .padding({ top: 12, bottom: 20 })

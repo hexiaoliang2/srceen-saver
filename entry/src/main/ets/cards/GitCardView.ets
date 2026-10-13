@@ -212,12 +212,20 @@ export struct ScreensaverGitCard {
               .color('#4A9EFF')
           }
         } else if (screenSaverGitViewModel.state === 'error' || screenSaverGitViewModel.state === 'offline') {
-          Text('重试')
-            .fontSize(11)
-            .fontColor('#4A9EFF')
+          if (this.cardMode === 'edit') {
+            Column() {
+              Text('重试')
+                .fontSize(11)
+                .fontColor('#4A9EFF')
+            }
+            .constraintSize({ minWidth: 40, minHeight: 40 })
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .margin({ right: -10, top: -4 })
             .onClick((): void => {
               this.handlePrimaryAction();
             })
+          }
         }
       }
       .width('100%')

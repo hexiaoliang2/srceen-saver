@@ -21,7 +21,7 @@ export const SCREEN_SAVER_CARD_MAX_ROWS: number = 6;
 export const SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC: number = 15;
 export const SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS: number[] = [15, 30, 60, 300];
 export const SCREEN_SAVER_PHOTO_MOVE_FADE_MS: number = 120;
-export const SCREEN_SAVER_GIT_WEEK_OPTIONS: number[] = [12, 20];
+export const SCREEN_SAVER_GIT_WEEK_OPTIONS: number[] = [12, 20, 26, 52];
 export const SCREEN_SAVER_GIT_THROTTLE_MS: number = 30 * 60 * 1000;
 export const SCREEN_SAVER_GIT_FETCH_TIMEOUT_MS: number = 10000;
 export const SCREEN_SAVER_PHOTO_MAX_RESIDENT: number = 3;
@@ -45,6 +45,7 @@ export interface ScreensaverCardMeta {
   cardType: ScreensaverCardType;
   displayName: string;
   description: string;
+  unique: boolean;
   defaultColSpan: number;
   defaultRowSpan: number;
   minColSpan: number;
@@ -99,6 +100,7 @@ export class ScreensaverClockConfig {
 @ObservedV2
 export class ScreensaverPhotoConfig {
   @Trace uris: string[] = [];
+  @Trace uriDates: Record<string, string> = {};
   @Trace sourceAlbum: string = 'all';
   @Trace intervalSec: number = 30;
   @Trace order: PhotoOrder = 'time';
@@ -127,6 +129,7 @@ export class ScreensaverGitConfig {
 export class ScreensaverCardInstance {
   @Trace id: string = '';
   @Trace cardType: ScreensaverCardType = 'clock';
+  @Trace enabled: boolean = true;
   @Trace colStart: number = 0;
   @Trace rowStart: number = 0;
   @Trace colSpan: number = 2;
@@ -146,6 +149,7 @@ export class ScreensaverSettings {
   @Trace videoDefaultAutoplay: boolean = false;
   @Trace keepScreenOn: boolean = true;
   @Trace motionDisabled: boolean = false;
+  @Trace lowBatteryAutoExit: boolean = true;
 }
 
 @ObservedV2
@@ -166,6 +170,7 @@ export interface ScreensaverRawClock {
 
 export interface ScreensaverRawPhoto {
   uris?: string[];
+  uriDates?: Record<string, string>;
   sourceAlbum?: string;
   intervalSec?: number;
   order?: string;
@@ -192,6 +197,7 @@ export interface ScreensaverRawGit {
 export interface ScreensaverRawCard {
   id?: string;
   cardType?: string;
+  enabled?: boolean;
   colStart?: number;
   rowStart?: number;
   colSpan?: number;
@@ -210,6 +216,7 @@ export interface ScreensaverRawSettings {
   videoDefaultAutoplay?: boolean;
   keepScreenOn?: boolean;
   motionDisabled?: boolean;
+  lowBatteryAutoExit?: boolean;
   dimEnabled?: boolean;
   dimDelaySec?: number;
   dimBrightness?: number;

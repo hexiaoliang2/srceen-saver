@@ -54,11 +54,24 @@ export struct ScreenSaverSettingsPage {
           }
           .width('100%')
 
-          Row() {
-            Text('默认切换间隔')
-              .fontSize(14)
-              .fontColor('#CCCCCC')
-            Blank()
+          Column() {
+            Row() {
+              Column() {
+                Text('默认切换间隔')
+                  .fontSize(14)
+                  .fontColor('#CCCCCC')
+                Text('卡片可单独覆盖')
+                  .fontSize(11)
+                  .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                  .margin({ top: 2 })
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Text(`${screenSaverAppModel.layout.settings.defaultIntervalSec} 秒`)
+                .fontSize(13)
+                .fontColor(SCREEN_SAVER_COLORS.accent)
+            }
+            .width('100%')
             Row({ space: 8 }) {
               ForEach(SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS, (seconds: number) => {
                 ScreenSaverChip({
@@ -71,6 +84,7 @@ export struct ScreenSaverSettingsPage {
                 })
               }, (seconds: number): string => `default_${seconds}`)
             }
+            .margin({ top: 10 })
           }
           .width('100%')
           .padding(14)
@@ -113,27 +127,6 @@ export struct ScreenSaverSettingsPage {
           .borderRadius(10)
           .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
 
-          Row() {
-            Column() {
-              Text('相册来源')
-                .fontSize(14)
-                .fontColor('#CCCCCC')
-              Text('在相册卡片的半模态中按相册选择')
-                .fontSize(11)
-                .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-                .margin({ top: 2 })
-            }
-            .alignItems(HorizontalAlign.Start)
-            .layoutWeight(1)
-            Text('全部')
-              .fontSize(13)
-              .fontColor(SCREEN_SAVER_COLORS.accent)
-          }
-          .width('100%')
-          .padding(14)
-          .borderRadius(10)
-          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
-
           Column() {
             ScreenSaverToggleRow({
               label: '视频默认播放',
@@ -168,11 +161,27 @@ export struct ScreenSaverSettingsPage {
 
           Column() {
             ScreenSaverToggleRow({
-              label: '关闭动效',
-              tip: '转场与切换改为直切，静态优先最省电',
+              label: '减弱动效',
+              tip: '跟随系统设置',
               isOn: screenSaverAppModel.layout.settings.motionDisabled,
               onChange: (value: boolean): void => {
                 screenSaverAppModel.layout.settings.motionDisabled = value;
+                screenSaverAppModel.save();
+              }
+            })
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(10)
+          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+
+          Column() {
+            ScreenSaverToggleRow({
+              label: '低电量自动退出',
+              tip: '低于 20% 时自动退出屏保',
+              isOn: screenSaverAppModel.layout.settings.lowBatteryAutoExit,
+              onChange: (value: boolean): void => {
+                screenSaverAppModel.layout.settings.lowBatteryAutoExit = value;
                 screenSaverAppModel.save();
               }
             })

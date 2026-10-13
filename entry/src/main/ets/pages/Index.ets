@@ -1,13 +1,13 @@
 ﻿import { ScreenSaverLogger } from '../common/Logger';
 import { SCREEN_SAVER_COLORS } from '../common/ScreenSaverStyle';
 import { screenSaverAppModel } from '../model/AppModel';
-import { SCREEN_SAVER_CARD_CATALOG } from '../cards/CardCatalog';
+import { screenSaverCardTypeName } from '../cards/CardCatalog';
 import { ScreensaverCardHost } from '../cards/CardHost';
 import { ScreenSaverPlayPage } from '../screensaver/ScreensaverPage';
 import { ScreenSaverSettingsPage } from '../screensaver/SettingsPage';
 import { ScreenSaverGuidePage } from '../screensaver/GuidePage';
 import { ScreenSaverCardLibraryPage } from '../screensaver/CardLibraryPage';
-import { ScreensaverLaunchParam, ScreensaverCardInstance, ScreensaverCardMeta } from '../model/ConfigModels';
+import { ScreensaverLaunchParam, ScreensaverCardInstance } from '../model/ConfigModels';
 
 @ComponentV2
 struct ScreenSaverConsole {
@@ -18,15 +18,16 @@ struct ScreenSaverConsole {
     this.navStack.pushPathByName('screensaver', param);
   }
 
-  private toggleCardType(meta: ScreensaverCardMeta, enabled: boolean): void {
-    if (enabled) {
-      const added = screenSaverAppModel.addCard(meta.cardType);
-      if (!added) {
-        this.toast('空间不足：请先移出或缩小卡片');
+  private cardTitle(card: ScreensaverCardInstance): string {
+    const name = screenSaverCardTypeName(card.cardType);
+    const sameType = screenSaverAppModel.cardsOfType(card.cardType);
+    if (sameType.length > 1) {
+      const index = sameType.findIndex((item: ScreensaverCardInstance): boolean => item.id === card.id);
+      if (index >= 0) {
+        return `${name} ${index + 1}`;
       }
-      return;
     }
-    screenSaverAppModel.removeCardsOfType(meta.cardType);
+    return name;
   }
 
   private toast(message: string): void {
@@ -42,21 +43,38 @@ struct ScreenSaverConsole {
   previewCard() {
     Column({ space: 6 }) {
       ForEach(screenSaverAppModel.layout.cards.slice(0, 3), (card: ScreensaverCardInstance) => {
-        Column() {
-          ScreensaverCardHost({
-            card: card,
-            cardMode: 'edit',
-            cardActive: false
+        if (card.enabled) {
+          Column() {
+            ScreensaverCardHost({
+              card: card,
+              cardMode: 'edit',
+              cardActive: false
+            })
+          }
+          .width('100%')
+          .height(card.cardType === 'clock' ? 56 : 44)
+          .borderRadius(8)
+          .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
+          .clip(true)
+        } else {
+          Row() {
+            Text(`${this.cardTitle(card)} · 已停用`)
+              .fontSize(11)
+              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+          }
+          .width('100%')
+          .height(card.cardType === 'clock' ? 56 : 44)
+          .borderRadius(8)
+          .border({
+            width: 1,
+            color: '#33FFFFFF',
+            style: BorderStyle.Dashed
           })
+          .justifyContent(FlexAlign.Center)
         }
-        .width('100%')
-        .height(card.cardType === 'clock' ? 56 : 44)
-        .borderRadius(8)
-        .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
-        .clip(true)
       }, (card: ScreensaverCardInstance): string => card.id)
       if (screenSaverAppModel.layout.cards.length === 0) {
-        Text('还没有卡片 · 点击下方开关添加')
+        Text('还没有卡片 · 点「＋ 添加卡片」加入')
           .fontSize(12)
           .fontColor(SCREEN_SAVER_COLORS.textTertiary)
           .height(56)
@@ -75,29 +93,20 @@ struct ScreenSaverConsole {
   }
 
   @Builder
-  cardRow(meta: ScreensaverCardMeta) {
+  addCardRow() {
     Row() {
-      Column() {
-        Text(meta.displayName)
-          .fontSize(14)
-          .fontColor(SCREEN_SAVER_COLORS.textPrimary)
-        Text(screenSaverAppModel.cardSummary(meta.cardType))
-          .fontSize(11)
-          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-          .margin({ top: 2 })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: screenSaverAppModel.hasCardType(meta.cardType) })
-        .selectedColor(SCREEN_SAVER_COLORS.accentStrong)
-        .onChange((value: boolean): void => {
-          this.toggleCardType(meta, value);
-        })
+      Text('＋ 添加卡片')
+        .fontSize(14)
+        .fontColor(SCREEN_SAVER_COLORS.accent)
     }
     .width('100%')
-    .padding(14)
+    .justifyContent(FlexAlign.Center)
+    .padding({ top: 13, bottom: 13 })
     .borderRadius(10)
     .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+    .onClick((): void => {
+      this.navStack.pushPathByName('library', '');
+    })
   }
 
   build() {
@@ -135,15 +144,38 @@ struct ScreenSaverConsole {
             .fontSize(15)
             .fontColor(SCREEN_SAVER_COLORS.textPrimary)
           Blank()
-          Text('长按卡片可调整布局与尺寸')
+          Text('开关控制是否显示')
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
         }
         .width('100%')
 
-        ForEach(SCREEN_SAVER_CARD_CATALOG, (meta: ScreensaverCardMeta) => {
-          this.cardRow(meta)
-        }, (meta: ScreensaverCardMeta): string => meta.cardType)
+        ForEach(screenSaverAppModel.layout.cards, (card: ScreensaverCardInstance) => {
+          Row() {
+            Column() {
+              Text(this.cardTitle(card))
+                .fontSize(14)
+                .fontColor(SCREEN_SAVER_COLORS.textPrimary)
+              Text(screenSaverAppModel.cardInstanceSummary(card))
+                .fontSize(11)
+                .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                .margin({ top: 2 })
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            Toggle({ type: ToggleType.Switch, isOn: card.enabled })
+              .selectedColor(SCREEN_SAVER_COLORS.accentStrong)
+              .onChange((value: boolean): void => {
+                screenSaverAppModel.setCardEnabled(card.id, value);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(10)
+          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+        }, (card: ScreensaverCardInstance): string => card.id)
+
+        this.addCardRow()
 
         Row() {
           Text('设置')

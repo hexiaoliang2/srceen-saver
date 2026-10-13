@@ -14,11 +14,13 @@ class ScreenSaverWindowController {
     }
     await this.safeCall((): Promise<void> => target.setWindowLayoutFullScreen(true), 'setWindowLayoutFullScreen(true)');
     await this.safeCall((): Promise<void> => target.setWindowSystemBarEnable([]), 'setWindowSystemBarEnable([])');
+    await this.safeCall((): Promise<void> => target.setPreferredOrientation(window.Orientation.PORTRAIT),
+      'setPreferredOrientation(PORTRAIT)');
     if (keepScreenOn) {
       await this.safeCall((): Promise<void> => target.setWindowKeepScreenOn(true), 'setWindowKeepScreenOn(true)');
     }
     await this.safeCall((): Promise<void> => target.setWindowBrightness(-1), 'setWindowBrightness(-1)');
-    ScreenSaverLogger.info(`window enter: immersive, keepScreenOn=${keepScreenOn}`);
+    ScreenSaverLogger.info(`window enter: immersive portrait, keepScreenOn=${keepScreenOn}`);
   }
 
   async exit(context: common.Context): Promise<void> {
@@ -28,6 +30,8 @@ class ScreenSaverWindowController {
     }
     await this.safeCall((): Promise<void> => target.setWindowLayoutFullScreen(false), 'setWindowLayoutFullScreen(false)');
     await this.safeCall((): Promise<void> => target.setWindowKeepScreenOn(false), 'setWindowKeepScreenOn(false)');
+    await this.safeCall((): Promise<void> => target.setPreferredOrientation(window.Orientation.UNSPECIFIED),
+      'setPreferredOrientation(UNSPECIFIED)');
     await this.safeCall((): Promise<void> => target.setWindowBrightness(-1), 'setWindowBrightness(-1)');
     await this.safeCall((): Promise<void> => target.setWindowSystemBarEnable(SCREEN_SAVER_SYSTEM_BARS),
       'setWindowSystemBarEnable(system bars)');

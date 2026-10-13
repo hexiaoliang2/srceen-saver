@@ -351,9 +351,32 @@ export struct ScreensaverPhotoCard {
       return;
     }
     const uri = this.playList[this.cursor];
+    const taken = this.formatTakenDate(uri);
+    if (taken.length > 0) {
+      this.infoText = taken;
+      return;
+    }
     const slash = uri.lastIndexOf('/');
     const name = slash >= 0 ? uri.substring(slash + 1) : uri;
     this.infoText = name.length > 40 ? `${name.substring(0, 40)}…` : name;
+  }
+
+  private formatTakenDate(uri: string): string {
+    const raw = this.card.photo.uriDates[uri];
+    if (raw === undefined || raw.length === 0) {
+      return '';
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) {
+      return '';
+    }
+    const ms = value < 10000000000 ? value * 1000 : value;
+    const date = new Date(ms);
+    const time = date.getTime();
+    if (!Number.isFinite(time) || time <= 0) {
+      return '';
+    }
+    return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
   }
 
   private scheduleRefit(): void {
@@ -528,15 +551,21 @@ export struct ScreensaverPhotoCard {
           Text('无相册访问权限')
             .fontSize(13)
             .fontColor('#B3B3B3')
-          Text('去开启')
-            .fontSize(12)
-            .fontColor('#4A9EFF')
-            .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+          if (this.cardMode === 'edit') {
+            Column() {
+              Text('去开启')
+                .fontSize(12)
+                .fontColor('#4A9EFF')
+            }
+            .constraintSize({ minWidth: 40, minHeight: 40 })
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
             .borderRadius(6)
             .backgroundColor('#26262B')
             .onClick((): void => {
               void this.openPermissionSetting();
             })
+          }
         }
       }
       if (this.infoText.length > 0) {

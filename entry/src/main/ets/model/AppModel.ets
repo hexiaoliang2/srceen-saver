@@ -5,6 +5,7 @@ import { SCREEN_SAVER_CARD_CATALOG, screenSaverFindCardMeta } from '../cards/Car
 import {
   SCREEN_SAVER_CARD_MAX_COLS,
   SCREEN_SAVER_CARD_MAX_ROWS,
+  SCREEN_SAVER_GIT_WEEK_OPTIONS,
   SCREEN_SAVER_GRID_COLS,
   SCREEN_SAVER_GRID_ROWS,
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
@@ -201,7 +202,24 @@ export class ScreensaverAppModel {
     return this.layout.cards.filter((card: ScreensaverCardInstance): boolean => card.cardType === cardType);
   }
 
+  cardAddBlockedReason(cardType: ScreensaverCardType): string {
+    const meta = screenSaverFindCardMeta(cardType);
+    if (meta === undefined) {
+      return '未知卡片类型';
+    }
+    if (meta.unique && this.hasCardType(cardType)) {
+      return `${meta.displayName}卡片最多添加一张`;
+    }
+    if (this.findFreeSlot(meta.defaultColSpan, meta.defaultRowSpan) === undefined) {
+      return '空间不足：请先移出或缩小卡片';
+    }
+    return '';
+  }
+
   addCard(cardType: ScreensaverCardType): boolean {
+    if (this.cardAddBlockedReason(cardType).length > 0) {
+      return false;
+    }
     const meta = screenSaverFindCardMeta(cardType);
     if (meta === undefined) {
       return false;
@@ -214,6 +232,35 @@ export class ScreensaverAppModel {
     this.layout.cards.push(card);
     this.save();
     return true;
+  }
+
+  setCardEnabled(cardId: string, enabled: boolean): void {
+    const card = this.cardById(cardId);
+    if (card === undefined || card.enabled === enabled) {
+      return;
+    }
+    card.enabled = enabled;
+    this.save();
+  }
+
+  snapshotCards(): string {
+    return JSON.stringify(this.toRawCards());
+  }
+
+  restoreCardsFromSnapshot(text: string): void {
+    if (text.length === 0) {
+      return;
+    }
+    let rawCards: ScreensaverRawCard[] = [];
+    try {
+      rawCards = JSON.parse(text) as ScreensaverRawCard[];
+    } catch (parseError) {
+      const error = parseError as Error;
+      ScreenSaverLogger.warn(`edit snapshot restore failed: ${error.message}`);
+      return;
+    }
+    this.applyCards(rawCards);
+    this.save();
   }
 
   removeCard(cardId: string): void {
@@ -326,24 +373,35 @@ export class ScreensaverAppModel {
     for (let i = 0; i < cellCount; i++) {
       occupied.push(false);
     }
+    const colFactor = columns / SCREEN_SAVER_GRID_COLS;
+    const rowFactor = rows / SCREEN_SAVER_GRID_ROWS;
     for (const card of this.layout.cards) {
-      const spanCols = Math.min(card.colSpan, columns);
-      const spanRows = Math.min(card.rowSpan, rows);
+      let spanCols = Math.max(1, Math.min(columns, Math.round(card.colSpan * colFactor)));
+      let spanRows = Math.max(1, Math.min(rows, Math.round(card.rowSpan * rowFactor)));
       let placed = false;
-      for (let row = 0; row <= rows - spanRows && !placed; row++) {
-        for (let col = 0; col <= columns - spanCols && !placed; col++) {
-          if (this.regionFree(occupied, columns, col, row, spanCols, spanRows)) {
-            this.markRegion(occupied, columns, col, row, spanCols, spanRows, true);
-            const pos: ScreensaverGridPos = {
-              colStart: col,
-              rowStart: row,
-              colSpan: spanCols,
-              rowSpan: spanRows
-            };
-            result.push(pos);
-            placed = true;
-          }
+      while (!placed) {
+        const slot = this.findRegionInOccupied(occupied, columns, rows, spanCols, spanRows);
+        if (slot !== undefined) {
+          this.markRegion(occupied, columns, slot.colStart, slot.rowStart, spanCols, spanRows, true);
+          const pos: ScreensaverGridPos = {
+            colStart: slot.colStart,
+            rowStart: slot.rowStart,
+            colSpan: spanCols,
+            rowSpan: spanRows
+          };
+          result.push(pos);
+          placed = true;
+          break;
         }
+        if (spanRows > 1) {
+          spanRows--;
+          continue;
+        }
+        if (spanCols > 1) {
+          spanCols--;
+          continue;
+        }
+        break;
       }
       if (!placed) {
         const pos: ScreensaverGridPos = { colStart: 0, rowStart: 0, colSpan: spanCols, rowSpan: spanRows };
@@ -351,6 +409,19 @@ export class ScreensaverAppModel {
       }
     }
     return result;
+  }
+
+  private findRegionInOccupied(occupied: boolean[], columns: number, rows: number, colSpan: number,
+    rowSpan: number): ScreensaverGridSlot | undefined {
+    for (let row = 0; row <= rows - rowSpan; row++) {
+      for (let col = 0; col <= columns - colSpan; col++) {
+        if (this.regionFree(occupied, columns, col, row, colSpan, rowSpan)) {
+          const slot: ScreensaverGridSlot = { colStart: col, rowStart: row };
+          return slot;
+        }
+      }
+    }
+    return undefined;
   }
 
   private regionFree(occupied: boolean[], columns: number, col: number, row: number, colSpan: number,
@@ -477,6 +548,7 @@ export class ScreensaverAppModel {
     settings.videoDefaultAutoplay = rawSettings.videoDefaultAutoplay ?? false;
     settings.keepScreenOn = rawSettings.keepScreenOn ?? true;
     settings.motionDisabled = rawSettings.motionDisabled ?? false;
+    settings.lowBatteryAutoExit = rawSettings.lowBatteryAutoExit ?? true;
   }
 
   private applyCards(rawCards: ScreensaverRawCard[]): void {
@@ -523,6 +595,7 @@ export class ScreensaverAppModel {
     const card = new ScreensaverCardInstance();
     card.id = (rawCard.id !== undefined && rawCard.id.length > 0) ? rawCard.id : screenSaverGenerateId('card');
     card.cardType = cardType;
+    card.enabled = rawCard.enabled ?? true;
     card.colSpan = screenSaverClampInt(rawCard.colSpan ?? 2, 1, maxCols);
     card.rowSpan = screenSaverClampInt(rawCard.rowSpan ?? 2, 1, maxRows);
     card.colStart = screenSaverClampInt(rawCard.colStart ?? 0, 0, SCREEN_SAVER_GRID_COLS - card.colSpan);
@@ -566,7 +639,7 @@ export class ScreensaverAppModel {
     card.clock.showSeconds = rawClock.showSeconds ?? false;
     const fontStep = rawClock.fontStep;
     if (fontStep !== undefined) {
-      card.clock.fontStep = screenSaverClampInt(fontStep, 0, 2);
+      card.clock.fontStep = screenSaverClampInt(fontStep, -1, 2);
     } else if (rawClock.fontScale !== undefined) {
       if (rawClock.fontScale >= 1.2) {
         card.clock.fontStep = 2;
@@ -589,6 +662,10 @@ export class ScreensaverAppModel {
       }
     }
     card.photo.uris = uris;
+    const rawDates = rawPhoto.uriDates;
+    if (rawDates !== undefined) {
+      card.photo.uriDates = rawDates;
+    }
     card.photo.sourceAlbum = rawPhoto.sourceAlbum ?? 'all';
     card.photo.intervalSec = screenSaverClampInt(rawPhoto.intervalSec ?? 30, SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC, 3600);
     if (rawPhoto.order === 'shuffle' || rawPhoto.order === 'time') {
@@ -619,7 +696,12 @@ export class ScreensaverAppModel {
     if (username !== undefined && username.length > 0) {
       card.git.username = username;
     }
-    card.git.weeks = (rawGit.weeks ?? 20) >= 20 ? 20 : 12;
+    const rawWeeks = rawGit.weeks;
+    if (rawWeeks !== undefined && SCREEN_SAVER_GIT_WEEK_OPTIONS.indexOf(rawWeeks) >= 0) {
+      card.git.weeks = rawWeeks;
+    } else {
+      card.git.weeks = 20;
+    }
     card.git.palette = rawGit.palette ?? 'green';
     card.git.offlineCache = rawGit.offlineCache ?? true;
   }
@@ -633,8 +715,18 @@ export class ScreensaverAppModel {
       albumSource: settings.albumSource,
       videoDefaultAutoplay: settings.videoDefaultAutoplay,
       keepScreenOn: settings.keepScreenOn,
-      motionDisabled: settings.motionDisabled
+      motionDisabled: settings.motionDisabled,
+      lowBatteryAutoExit: settings.lowBatteryAutoExit
     };
+    const rawLayout: ScreensaverRawLayout = {
+      schemaVersion: SCREEN_SAVER_SCHEMA_VERSION,
+      settings: rawSettings,
+      cards: this.toRawCards()
+    };
+    return rawLayout;
+  }
+
+  private toRawCards(): ScreensaverRawCard[] {
     const rawCards: ScreensaverRawCard[] = [];
     for (const card of this.layout.cards) {
       const rawClock: ScreensaverRawClock = {
@@ -645,6 +737,7 @@ export class ScreensaverAppModel {
       };
       const rawPhoto: ScreensaverRawPhoto = {
         uris: card.photo.uris,
+        uriDates: card.photo.uriDates,
         sourceAlbum: card.photo.sourceAlbum,
         intervalSec: card.photo.intervalSec,
         order: card.photo.order,
@@ -667,6 +760,7 @@ export class ScreensaverAppModel {
       const rawCard: ScreensaverRawCard = {
         id: card.id,
         cardType: card.cardType,
+        enabled: card.enabled,
         colStart: card.colStart,
         rowStart: card.rowStart,
         colSpan: card.colSpan,
@@ -678,12 +772,7 @@ export class ScreensaverAppModel {
       };
       rawCards.push(rawCard);
     }
-    const rawLayout: ScreensaverRawLayout = {
-      schemaVersion: SCREEN_SAVER_SCHEMA_VERSION,
-      settings: rawSettings,
-      cards: rawCards
-    };
-    return rawLayout;
+    return rawCards;
   }
 
   private gitDaysToRaw(days: ScreensaverGitDay[]): ScreensaverRawGitDay[] {
@@ -732,6 +821,33 @@ export class ScreensaverAppModel {
       return `已添加 ×${cards.length}`;
     }
     return `${defaultCols}×${defaultRows} · 已添加`;
+  }
+
+  cardInstanceSummary(card: ScreensaverCardInstance): string {
+    if (card.cardType === 'clock') {
+      if (card.clock.format === 'timeOnly') {
+        return '纯时间';
+      }
+      if (card.clock.format === 'dateOnly') {
+        return '纯日期';
+      }
+      if (card.clock.format === 'lunar') {
+        return '农历';
+      }
+      return '时间 + 日期';
+    }
+    if (card.cardType === 'photo') {
+      const count = card.photo.uris.length;
+      const interval = card.photo.intervalSec > 0 ? `${card.photo.intervalSec}s 切换` : '手动切换';
+      return count > 0 ? `${count} 张照片 · ${interval}` : '未选择照片';
+    }
+    if (card.cardType === 'video') {
+      if (card.video.uri.length === 0) {
+        return '未选择视频';
+      }
+      return card.video.playing ? '播放中' : '显示封面帧';
+    }
+    return `@${card.git.username} · ${card.git.weeks} 周`;
   }
 
   catalogMetas(): ScreensaverCardMeta[] {

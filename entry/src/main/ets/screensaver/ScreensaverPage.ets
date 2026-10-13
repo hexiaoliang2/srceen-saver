@@ -1,5 +1,6 @@
 ﻿import { mediaquery } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { batteryInfo } from '@kit.BasicServicesKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverWindowController } from '../common/WindowController';
 import { screenSaverVibration } from '../common/VibrationHelper';
@@ -21,6 +22,7 @@ import {
   ScreenSaverBreakpointObserver
 } from '../common/Breakpoints';
 import { ScreensaverClockCard } from '../cards/ClockCardView';
+import { screenSaverCardTypeName } from '../cards/CardCatalog';
 import { ScreenSaverClockSettingsPanel } from './sheets/ClockSettingsSheet';
 import { ScreenSaverPhotoSettingsPanel } from './sheets/PhotoSettingsSheet';
 import { ScreenSaverVideoSettingsPanel } from './sheets/VideoSettingsSheet';
@@ -33,16 +35,12 @@ import {
   ScreensaverGridPos
 } from '../model/ConfigModels';
 
-interface EditSizeSnapshot {
-  id: string;
-  colStart: number;
-  rowStart: number;
-  colSpan: number;
-  rowSpan: number;
-}
-
 const FALLBACK_CARD_ID: string = 'fallback_clock';
 const SCREEN_SAVER_EDIT_MAX_WIDTH: number = 480;
+const SCREEN_SAVER_BURN_IN_INTERVAL_MS: number = 15 * 60 * 1000;
+const SCREEN_SAVER_BATTERY_POLL_MS: number = 60 * 1000;
+const SCREEN_SAVER_LOW_BATTERY_SOC: number = 20;
+const SCREEN_SAVER_BURN_IN_OFFSETS: number[][] = [[0, 0], [5, -3], [-3, 5], [-5, -3], [3, 5]];
 
 function buildFallbackCard(): ScreensaverCardInstance {
   const card = new ScreensaverCardInstance();
@@ -79,15 +77,20 @@ export struct ScreenSaverPlayPage {
   @Local isWide: boolean = false;
   @Local pageActive: boolean = true;
   @Local fallbackCard: ScreensaverCardInstance = buildFallbackCard();
+  @Local burnInShiftX: number = 0;
+  @Local burnInShiftY: number = 0;
 
   private capsuleTimer: number = -1;
+  private burnInTimer: number = -1;
+  private batteryTimer: number = -1;
+  private burnInStep: number = 0;
   private gridW: number = 0;
   private gridH: number = 0;
   private touchStartX: number = 0;
   private touchStartY: number = 0;
   private resizeTouchStartX: number = 0;
   private resizeTouchStartY: number = 0;
-  private editSnapshot: EditSizeSnapshot[] = [];
+  private editSnapshotText: string = '';
   private widePositions: ScreensaverGridPos[] = [];
   private breakpointObserver: ScreenSaverBreakpointObserver = new ScreenSaverBreakpointObserver();
 
@@ -113,10 +116,14 @@ export struct ScreenSaverPlayPage {
       });
     }
     screenSaverGitViewModel.hydrateFromCache();
+    this.startBurnInTimer();
+    this.startBatteryWatch();
   }
 
   aboutToDisappear(): void {
     this.stopCapsuleTimer();
+    this.stopBurnInTimer();
+    this.stopBatteryWatch();
     this.breakpointObserver.stop();
     this.pageActive = false;
     const context = this.getUIContext().getHostContext();
@@ -146,7 +153,7 @@ export struct ScreenSaverPlayPage {
   }
 
   private positionOf(index: number, card: ScreensaverCardInstance): ScreensaverGridPos {
-    if (this.isWide && index < this.widePositions.length) {
+    if (!this.editMode && this.isWide && index < this.widePositions.length) {
       return this.widePositions[index];
     }
     const pos: ScreensaverGridPos = {
@@ -172,7 +179,7 @@ export struct ScreenSaverPlayPage {
     }
     ScreenSaverLogger.info('enter edit mode');
     screenSaverVibration.longPressFeedback();
-    this.takeSnapshot();
+    this.editSnapshotText = screenSaverAppModel.snapshotCards();
     this.editMode = true;
     const duration = screenSaverMotionDuration(SCREEN_SAVER_MOTION_EDIT_ENTER_MS);
     if (duration <= 0) {
@@ -190,40 +197,13 @@ export struct ScreenSaverPlayPage {
 
   private exitEditMode(restore: boolean): void {
     if (restore) {
-      this.restoreSnapshot();
+      screenSaverAppModel.restoreCardsFromSnapshot(this.editSnapshotText);
     }
+    this.editSnapshotText = '';
     this.selectedCardId = '';
     this.editMode = false;
     this.editProgress = 0;
     this.closeSheet();
-  }
-
-  private takeSnapshot(): void {
-    this.editSnapshot = [];
-    for (const card of screenSaverAppModel.layout.cards) {
-      const item: EditSizeSnapshot = {
-        id: card.id,
-        colStart: card.colStart,
-        rowStart: card.rowStart,
-        colSpan: card.colSpan,
-        rowSpan: card.rowSpan
-      };
-      this.editSnapshot.push(item);
-    }
-  }
-
-  private restoreSnapshot(): void {
-    for (const item of this.editSnapshot) {
-      const card = screenSaverAppModel.cardById(item.id);
-      if (card === undefined) {
-        continue;
-      }
-      card.colStart = item.colStart;
-      card.rowStart = item.rowStart;
-      card.colSpan = item.colSpan;
-      card.rowSpan = item.rowSpan;
-    }
-    screenSaverAppModel.save();
   }
 
   private showCapsule(): void {
@@ -264,6 +244,67 @@ export struct ScreenSaverPlayPage {
       clearTimeout(this.capsuleTimer);
       this.capsuleTimer = -1;
     }
+  }
+
+  private startBurnInTimer(): void {
+    this.burnInTimer = setInterval((): void => {
+      this.burnInStep = (this.burnInStep + 1) % SCREEN_SAVER_BURN_IN_OFFSETS.length;
+      const offset = SCREEN_SAVER_BURN_IN_OFFSETS[this.burnInStep];
+      this.burnInShiftX = offset[0];
+      this.burnInShiftY = offset[1];
+    }, SCREEN_SAVER_BURN_IN_INTERVAL_MS);
+  }
+
+  private stopBurnInTimer(): void {
+    if (this.burnInTimer >= 0) {
+      clearInterval(this.burnInTimer);
+      this.burnInTimer = -1;
+    }
+    this.burnInShiftX = 0;
+    this.burnInShiftY = 0;
+  }
+
+  private burnInX(card: ScreensaverCardInstance): number {
+    if (this.editMode || card.cardType !== 'clock') {
+      return 0;
+    }
+    return this.burnInShiftX;
+  }
+
+  private burnInY(card: ScreensaverCardInstance): number {
+    if (this.editMode || card.cardType !== 'clock') {
+      return 0;
+    }
+    return this.burnInShiftY;
+  }
+
+  private startBatteryWatch(): void {
+    this.checkBattery();
+    this.batteryTimer = setInterval((): void => {
+      this.checkBattery();
+    }, SCREEN_SAVER_BATTERY_POLL_MS);
+  }
+
+  private stopBatteryWatch(): void {
+    if (this.batteryTimer >= 0) {
+      clearInterval(this.batteryTimer);
+      this.batteryTimer = -1;
+    }
+  }
+
+  private checkBattery(): void {
+    if (this.editMode || !screenSaverAppModel.layout.settings.lowBatteryAutoExit) {
+      return;
+    }
+    const soc = batteryInfo.batterySOC;
+    if (soc <= 0 || soc > SCREEN_SAVER_LOW_BATTERY_SOC) {
+      return;
+    }
+    if (batteryInfo.chargingStatus === batteryInfo.BatteryChargeState.ENABLE) {
+      return;
+    }
+    this.toast('电量低于 20%，已自动退出屏保');
+    this.exitScreensaver();
   }
 
   private handleScreenTap(): void {
@@ -334,14 +375,25 @@ export struct ScreenSaverPlayPage {
     this.selectedCardId = '';
   }
 
-  private bringSelectedToFront(): void {
-    if (this.selectedCardId.length === 0) {
-      return;
-    }
-    const moved = screenSaverAppModel.bringToFront(this.selectedCardId);
-    if (!moved) {
-      this.toast('已在最上层');
-    }
+  private confirmRemoveCard(cardId: string): void {
+    this.getUIContext().showAlertDialog({
+      title: '移除卡片',
+      message: '确定要移除这张卡片吗？',
+      primaryButton: {
+        value: '取消',
+        action: (): void => {}
+      },
+      secondaryButton: {
+        value: '移除',
+        fontColor: SCREEN_SAVER_COLORS.danger,
+        action: (): void => {
+          if (this.selectedCardId === cardId) {
+            this.selectedCardId = '';
+          }
+          screenSaverAppModel.removeCard(cardId);
+        }
+      }
+    });
   }
 
   private addCardViaLibrary(): void {
@@ -613,17 +665,22 @@ export struct ScreenSaverPlayPage {
       Column() {
         ScreensaverClockCard({ card: this.fallbackCard, cardMode: 'play' })
       }
-      .width('70%')
-      .height(140)
-      Text('长按添加卡片')
-        .fontSize(13)
-        .fontColor('#8C8C8C')
-        .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-        .borderRadius(8)
+      .width('100%')
+      .height(158)
+      .translate({
+        x: this.burnInX(this.fallbackCard),
+        y: this.burnInY(this.fallbackCard)
+      })
+      Text('长按进入编辑模式 · 再点「＋ 添加卡片」')
+        .fontSize(12)
+        .fontColor(SCREEN_SAVER_COLORS.textSecondary)
+        .padding({ left: 14, right: 14, top: 7, bottom: 7 })
+        .borderRadius(14)
         .backgroundColor(SCREEN_SAVER_COLORS.canvasChipBg)
     }
     .width('100%')
     .height('100%')
+    .padding({ left: 16, right: 16 })
     .justifyContent(FlexAlign.Center)
     .onClick((): void => {
       this.handleScreenTap();
@@ -639,7 +696,7 @@ export struct ScreenSaverPlayPage {
             Column()
               .width('100%')
               .height('100%')
-              .border({ width: 0.5, color: '#1AFFFFFF' })
+              .border({ width: 0.5, color: '#24FFFFFF' })
               .layoutWeight(1)
               .hitTestBehavior(HitTestMode.None)
           }, (colIndex: number): string => `grid_c_${rowIndex}_${colIndex}`)
@@ -685,58 +742,30 @@ export struct ScreenSaverPlayPage {
 
   @Builder
   editBottomBar() {
-    Column({ space: 8 }) {
-      if (this.selectedCardId.length > 0) {
-        Row({ space: 8 }) {
-          Text('删除卡片')
-            .fontSize(13)
-            .fontColor(SCREEN_SAVER_COLORS.danger)
-            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-            .borderRadius(8)
-            .backgroundColor('#26E67A7A')
-            .onClick((): void => {
-              this.removeSelected();
-            })
-          Text('卡片设置')
-            .fontSize(13)
-            .fontColor(SCREEN_SAVER_COLORS.white)
-            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-            .borderRadius(8)
-            .backgroundColor(SCREEN_SAVER_COLORS.accentStrong)
-            .onClick((): void => {
-              this.openSettingsForSelected();
-            })
-          Text('置顶')
-            .fontSize(13)
-            .fontColor('#DDDDDD')
-            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-            .borderRadius(8)
-            .backgroundColor('#26262B')
-            .onClick((): void => {
-              this.bringSelectedToFront();
-            })
-        }
-      }
-      Row({ space: 8 }) {
+    Row() {
+      Column() {
         Text('＋ 添加卡片')
           .fontSize(13)
-          .fontColor(SCREEN_SAVER_COLORS.accent)
-          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-          .borderRadius(8)
-          .backgroundColor('#26262B')
-          .onClick((): void => {
-            this.addCardViaLibrary();
-          })
-        if (this.selectedCardId.length === 0) {
-          Text(this.cards().length === 0 ? '先添加一张卡片' : '点击卡片可选中 · 拖动排序 · 右下角手柄调尺寸')
-            .fontSize(11)
-            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-        }
+          .fontColor(SCREEN_SAVER_COLORS.white)
+          .padding({ left: 18, right: 18, top: 7, bottom: 7 })
+          .borderRadius(16)
+          .backgroundColor(SCREEN_SAVER_COLORS.accent)
+      }
+      .constraintSize({ minHeight: 40 })
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+      .onClick((): void => {
+        this.addCardViaLibrary();
+      })
+      Blank()
+      if (this.cards().length > 0) {
+        Text('长按拖动 · 单击配置')
+          .fontSize(11)
+          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
       }
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 10, bottom: 16 })
-    .backgroundColor('#14000000')
     .hitTestBehavior(HitTestMode.None)
   }
 
@@ -790,6 +819,7 @@ export struct ScreenSaverPlayPage {
       }
     }
     .width('100%')
+    .height('100%')
   }
 
   private sheetCard(): ScreensaverCardInstance {
@@ -800,21 +830,68 @@ export struct ScreenSaverPlayPage {
   @Builder
   cardCell(card: ScreensaverCardInstance, index: number) {
     Stack() {
-      ScreensaverCardHost({
-        card: card,
-        cardMode: this.editMode ? 'edit' : 'play',
-        cardActive: this.pageActive && !this.editMode,
-        onRequestConfig: (): void => {
-          this.selectCard(card.id);
-          this.openSettingsForSelected();
+      if (!card.enabled) {
+        Column({ space: 4 }) {
+          Text(screenSaverCardTypeName(card.cardType))
+            .fontSize(13)
+            .fontColor(SCREEN_SAVER_COLORS.textSecondary)
+          Text('已停用')
+            .fontSize(11)
+            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
         }
-      })
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .border({
+          width: 1,
+          color: '#33FFFFFF',
+          radius: 8,
+          style: BorderStyle.Dashed
+        })
+      } else {
+        ScreensaverCardHost({
+          card: card,
+          cardMode: this.editMode ? 'edit' : 'play',
+          cardActive: this.pageActive && !this.editMode,
+          onRequestConfig: (): void => {
+            this.selectCard(card.id);
+            this.openSettingsForSelected();
+          }
+        })
+      }
       if (this.editMode) {
         if (card.id === this.selectedCardId) {
           Column()
             .width('100%')
             .height('100%')
             .border({ width: 2, color: SCREEN_SAVER_COLORS.accent, radius: 8 })
+          Column() {
+            Column() {
+              Text('×')
+                .fontSize(16)
+                .fontColor('#F2F2F2')
+                .fontWeight(FontWeight.Medium)
+            }
+            .width(28)
+            .height(28)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .borderRadius(14)
+            .backgroundColor('#000000')
+          }
+          .width(40)
+          .height(40)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .align(Alignment.TopEnd)
+          .margin({ right: 2, top: 8 })
+          .onTouch((event: TouchEvent): void => {
+            event.stopPropagation();
+          })
+          .onClick((): void => {
+            this.confirmRemoveCard(card.id);
+          })
         }
         if (card.id === this.dragCardId && this.dragInvalid) {
           Column()
@@ -847,7 +924,7 @@ export struct ScreenSaverPlayPage {
           Column()
             .width(SCREEN_SAVER_METRICS.handleVisualSize)
             .height(SCREEN_SAVER_METRICS.handleVisualSize)
-            .borderRadius(4)
+            .borderRadius(8)
             .backgroundColor(SCREEN_SAVER_COLORS.accent)
         }
         .width(SCREEN_SAVER_METRICS.handleHitSize)
@@ -872,9 +949,17 @@ export struct ScreenSaverPlayPage {
       y: card.id === this.dragCardId ? this.dragOffsetY : 0
     })
     .zIndex(card.id === this.dragCardId ? 20 : index)
+    .translate({
+      x: this.burnInX(card),
+      y: this.burnInY(card)
+    })
     .onClick((): void => {
       if (this.editMode) {
-        this.selectCard(card.id);
+        if (card.id === this.selectedCardId) {
+          this.openSettingsForSelected();
+        } else {
+          this.selectCard(card.id);
+        }
       } else {
         this.handleScreenTap();
       }
@@ -904,6 +989,26 @@ export struct ScreenSaverPlayPage {
 
   private gridRows(): number {
     return this.editMode ? SCREEN_SAVER_GRID_ROWS : this.rows;
+  }
+
+  private playCenterOffsetY(): number {
+    if (this.editMode || this.gridH <= 0) {
+      return 0;
+    }
+    const cards = this.cards();
+    if (cards.length <= 1) {
+      return 0;
+    }
+    let usedRows = 0;
+    for (let index = 0; index < cards.length; index++) {
+      const pos = this.positionOf(index, cards[index]);
+      usedRows = Math.max(usedRows, pos.rowStart + pos.rowSpan);
+    }
+    const freeRows = this.gridRows() - usedRows;
+    if (freeRows <= 0) {
+      return 0;
+    }
+    return freeRows / 2 * (this.gridH / this.gridRows());
   }
 
   build() {
@@ -941,6 +1046,7 @@ export struct ScreenSaverPlayPage {
             .rowsTemplate(this.templateOf(this.gridRows()))
             .width(this.editMode && this.isWide ? SCREEN_SAVER_EDIT_MAX_WIDTH : '100%')
             .height('100%')
+            .translate({ y: this.playCenterOffsetY() })
             .onClick((): void => {
               this.handleScreenTap();
             })

@@ -154,15 +154,21 @@ export struct ScreensaverVideoCard {
           Text('文件已被删除 · 请在配置中重新选择')
             .fontSize(11)
             .fontColor('#6E6E73')
-          Text('重选')
-            .fontSize(12)
-            .fontColor('#4A9EFF')
-            .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+          if (this.cardMode === 'edit') {
+            Column() {
+              Text('重选')
+                .fontSize(12)
+                .fontColor('#4A9EFF')
+            }
+            .constraintSize({ minWidth: 40, minHeight: 40 })
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
             .borderRadius(6)
             .backgroundColor('#26262B')
             .onClick((): void => {
               this.handleReselect();
             })
+          }
         }
         .width('100%')
         .height('100%')

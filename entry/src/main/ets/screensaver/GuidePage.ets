@@ -76,6 +76,9 @@ export struct ScreenSaverGuidePage {
             Text('深色省电 · 静态优先设计')
               .fontSize(13)
               .fontColor(SCREEN_SAVER_COLORS.textSecondary)
+            Text('单击呼出退出 · 长按进入编辑')
+              .fontSize(13)
+              .fontColor(SCREEN_SAVER_COLORS.textSecondary)
           }
 
           Text('开始使用')

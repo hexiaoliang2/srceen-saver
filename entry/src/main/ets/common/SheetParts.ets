@@ -14,7 +14,7 @@ export struct ScreenSaverSheetHeader {
       Text('完成')
         .fontSize(14)
         .fontColor(SCREEN_SAVER_COLORS.accent)
-        .padding({ left: 12, right: 2, top: 4, bottom: 4 })
+        .padding({ left: 12, right: 4, top: 11, bottom: 11 })
         .onClick((): void => {
           this.onDone();
         })
@@ -31,19 +31,24 @@ export struct ScreenSaverChip {
   @Event onTap: () => void = (): void => {};
 
   build() {
-    Text(this.label)
-      .fontSize(12)
-      .fontColor(this.selected ? SCREEN_SAVER_COLORS.white :
-        (this.chipEnabled ? '#BBBBBB' : '#55555A'))
-      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-      .borderRadius(8)
-      .backgroundColor(this.selected ? SCREEN_SAVER_COLORS.accentStrong : SCREEN_SAVER_COLORS.divider)
-      .opacity(this.chipEnabled ? 1 : 0.5)
-      .onClick((): void => {
-        if (this.chipEnabled) {
-          this.onTap();
-        }
-      })
+    Column() {
+      Text(this.label)
+        .fontSize(12)
+        .fontColor(this.selected ? SCREEN_SAVER_COLORS.white :
+          (this.chipEnabled ? '#BBBBBB' : '#55555A'))
+        .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+        .borderRadius(8)
+        .backgroundColor(this.selected ? SCREEN_SAVER_COLORS.accentStrong : SCREEN_SAVER_COLORS.divider)
+    }
+    .constraintSize({ minWidth: 40, minHeight: 40 })
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+    .opacity(this.chipEnabled ? 1 : 0.5)
+    .onClick((): void => {
+      if (this.chipEnabled) {
+        this.onTap();
+      }
+    })
   }
 }
 
@@ -92,7 +97,7 @@ export struct ScreenSaverDeleteCardRow {
     }
     .width('100%')
     .justifyContent(FlexAlign.Center)
-    .padding({ top: 10, bottom: 10 })
+    .padding({ top: 12, bottom: 12 })
     .borderRadius(8)
     .backgroundColor('#1C1C20')
     .onClick((): void => {

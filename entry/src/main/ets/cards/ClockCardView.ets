@@ -1,3 +1,4 @@
+import { common } from '@kit.AbilityKit';
 import { screenSaverTicker, ScreenSaverTickListener } from '../common/Ticker';
 import {
   screenSaverFormatDate,
@@ -77,13 +78,28 @@ export struct ScreensaverClockCard {
   }
 
   private fontStepFactor(): number {
-    if (this.card.clock.fontStep <= 0) {
+    if (this.card.clock.fontStep < 0) {
+      return this.systemFontFactor();
+    }
+    if (this.card.clock.fontStep === 0) {
       return 0.85;
     }
     if (this.card.clock.fontStep >= 2) {
       return 1.25;
     }
     return 1;
+  }
+
+  private systemFontFactor(): number {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) {
+      return 1;
+    }
+    const scale = context.config.fontSizeScale;
+    if (scale === undefined || !Number.isFinite(scale) || scale <= 0) {
+      return 1;
+    }
+    return Math.min(1.25, Math.max(0.85, scale));
   }
 
   private buildPlan(now: Date): ScreenSaverClockFontPlan {

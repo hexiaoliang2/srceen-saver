@@ -24,6 +24,7 @@ const FORMAT_OPTIONS: ClockFormatOption[] = [
 ];
 
 const FONT_STEP_OPTIONS: ScreensaverNumberOption[] = [
+  { value: -1, label: '跟随系统' },
   { value: 0, label: '小' },
   { value: 1, label: '标准' },
   { value: 2, label: '大' }
@@ -69,132 +70,144 @@ export struct ScreenSaverClockSettingsPanel {
   }
 
   build() {
-    Column({ space: 12 }) {
+    Column() {
       ScreenSaverSheetHeader({
         title: '时钟卡片',
         onDone: (): void => {
           this.onDone();
         }
       })
+      .padding({ left: 16, right: 16 })
 
-      Column() {
-        ScreensaverClockCard({ card: this.card, cardMode: 'edit' })
-      }
-      .width('100%')
-      .height(120)
-      .borderRadius(8)
-      .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
-      .clip(true)
-
-      Column({ space: 6 }) {
-        Text('格式')
-          .fontSize(13)
-          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+      Scroll() {
+        Column({ space: 12 }) {
+          Column() {
+            ScreensaverClockCard({ card: this.card, cardMode: 'edit' })
+          }
           .width('100%')
-        Row({ space: 8 }) {
-          ForEach(FORMAT_OPTIONS, (option: ClockFormatOption) => {
-            ScreenSaverChip({
-              label: option.label,
-              selected: this.card.clock.format === option.value,
-              chipEnabled: !this.isMinimal() || option.value === 'timeOnly',
-              onTap: (): void => {
-                this.setFormat(option.value);
-              }
-            })
-          }, (option: ClockFormatOption): string => option.value)
+          .height(120)
+          .borderRadius(8)
+          .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
+          .clip(true)
+
+          Column({ space: 6 }) {
+            Text('格式')
+              .fontSize(13)
+              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+              .width('100%')
+            Row({ space: 8 }) {
+              ForEach(FORMAT_OPTIONS, (option: ClockFormatOption) => {
+                ScreenSaverChip({
+                  label: option.label,
+                  selected: this.card.clock.format === option.value,
+                  chipEnabled: !this.isMinimal() || option.value === 'timeOnly',
+                  onTap: (): void => {
+                    this.setFormat(option.value);
+                  }
+                })
+              }, (option: ClockFormatOption): string => option.value)
+            }
+            .width('100%')
+            if (this.isMinimal()) {
+              Text('2×1 最小尺寸下仅支持纯时间 32fp')
+                .fontSize(11)
+                .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                .width('100%')
+            }
+          }
+          .width('100%')
+
+          Row() {
+            Text('时间制式')
+              .fontSize(14)
+              .fontColor('#CCCCCC')
+            Blank()
+            Row({ space: 8 }) {
+              ScreenSaverChip({
+                label: '12小时',
+                selected: !this.card.clock.use24Hour,
+                onTap: (): void => {
+                  this.card.clock.use24Hour = false;
+                  this.applyChange();
+                }
+              })
+              ScreenSaverChip({
+                label: '24小时',
+                selected: this.card.clock.use24Hour,
+                onTap: (): void => {
+                  this.card.clock.use24Hour = true;
+                  this.applyChange();
+                }
+              })
+            }
+          }
+          .width('100%')
+
+          ScreenSaverToggleRow({
+            label: '显示秒',
+            tip: '开启后每秒刷新，更耗电',
+            isOn: this.card.clock.showSeconds,
+            onChange: (value: boolean): void => {
+              this.card.clock.showSeconds = value;
+              this.applyChange();
+            }
+          })
+
+          Row() {
+            Text('字号')
+              .fontSize(14)
+              .fontColor('#CCCCCC')
+            Blank()
+            Row({ space: 8 }) {
+              ForEach(FONT_STEP_OPTIONS, (option: ScreensaverNumberOption) => {
+                ScreenSaverChip({
+                  label: option.label,
+                  selected: this.card.clock.fontStep === option.value,
+                  onTap: (): void => {
+                    this.card.clock.fontStep = option.value;
+                    this.applyChange();
+                  }
+                })
+              }, (option: ScreensaverNumberOption): string => option.label)
+            }
+          }
+          .width('100%')
+
+          Row() {
+            Text('尺寸')
+              .fontSize(14)
+              .fontColor('#CCCCCC')
+            Blank()
+            Row({ space: 8 }) {
+              ForEach(screenSaverFindCardMeta('clock')?.sizePresets ?? [], (preset: ScreensaverSizePreset) => {
+                ScreenSaverChip({
+                  label: preset.label,
+                  selected: this.card.colSpan === preset.colSpan && this.card.rowSpan === preset.rowSpan,
+                  onTap: (): void => {
+                    this.applySizePreset(preset);
+                  }
+                })
+              }, (preset: ScreensaverSizePreset): string => preset.label)
+            }
+          }
+          .width('100%')
+
+          ScreenSaverDeleteCardRow({
+            onDelete: (): void => {
+              this.onDelete();
+            }
+          })
         }
         .width('100%')
-        if (this.isMinimal()) {
-          Text('2×1 最小尺寸下仅支持纯时间 32fp')
-            .fontSize(11)
-            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-            .width('100%')
-        }
+        .padding({ left: 16, right: 16, bottom: 28 })
       }
       .width('100%')
-
-      Row() {
-        Text('时间制式')
-          .fontSize(14)
-          .fontColor('#CCCCCC')
-        Blank()
-        Row({ space: 8 }) {
-          ScreenSaverChip({
-            label: '12小时',
-            selected: !this.card.clock.use24Hour,
-            onTap: (): void => {
-              this.card.clock.use24Hour = false;
-              this.applyChange();
-            }
-          })
-          ScreenSaverChip({
-            label: '24小时',
-            selected: this.card.clock.use24Hour,
-            onTap: (): void => {
-              this.card.clock.use24Hour = true;
-              this.applyChange();
-            }
-          })
-        }
-      }
-      .width('100%')
-
-      ScreenSaverToggleRow({
-        label: '显示秒',
-        tip: '开启后每秒刷新，更耗电',
-        isOn: this.card.clock.showSeconds,
-        onChange: (value: boolean): void => {
-          this.card.clock.showSeconds = value;
-          this.applyChange();
-        }
-      })
-
-      Row() {
-        Text('字号')
-          .fontSize(14)
-          .fontColor('#CCCCCC')
-        Blank()
-        Row({ space: 8 }) {
-          ForEach(FONT_STEP_OPTIONS, (option: ScreensaverNumberOption) => {
-            ScreenSaverChip({
-              label: option.label,
-              selected: this.card.clock.fontStep === option.value,
-              onTap: (): void => {
-                this.card.clock.fontStep = option.value;
-                this.applyChange();
-              }
-            })
-          }, (option: ScreensaverNumberOption): string => option.label)
-        }
-      }
-      .width('100%')
-
-      Row() {
-        Text('尺寸')
-          .fontSize(14)
-          .fontColor('#CCCCCC')
-        Blank()
-        Row({ space: 8 }) {
-          ForEach(screenSaverFindCardMeta('clock')?.sizePresets ?? [], (preset: ScreensaverSizePreset) => {
-            ScreenSaverChip({
-              label: preset.label,
-              selected: this.card.colSpan === preset.colSpan && this.card.rowSpan === preset.rowSpan,
-              onTap: (): void => {
-                this.applySizePreset(preset);
-              }
-            })
-          }, (preset: ScreensaverSizePreset): string => preset.label)
-        }
-      }
-      .width('100%')
-
-      ScreenSaverDeleteCardRow({
-        onDelete: (): void => {
-          this.onDelete();
-        }
-      })
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring)
+      .margin({ top: 4 })
     }
     .width('100%')
-    .padding(16)
+    .height('100%')
   }
 }

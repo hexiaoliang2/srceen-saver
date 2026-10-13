@@ -33,7 +33,7 @@ export const SCREEN_SAVER_COLORS: ScreenSaverColors = {
   cardBg: '#141418',
   textPrimary: '#F2F2F2',
   textSecondary: '#A8A8AE',
-  textTertiary: '#77777D',
+  textTertiary: '#8A8A90',
   accent: '#4A9EFF',
   accentStrong: '#3D6FBF',
   danger: '#E67A7A',
@@ -50,7 +50,7 @@ export const SCREEN_SAVER_METRICS: ScreenSaverMetrics = {
   panelRadius: 10,
   capsuleHeight: 40,
   handleHitSize: 44,
-  handleVisualSize: 24,
+  handleVisualSize: 28,
   snapThresholdVp: 8,
   longPressMs: 500,
   capsuleAutoHideMs: 2000
