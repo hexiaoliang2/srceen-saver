@@ -5,13 +5,14 @@
  *
  * 【这个文件是干什么的】
  * 负责把磁盘上的图片文件解码成系统能显示的 PixelMap，并做两件重要优化：
- *   1. 「按需裁剪解码」：只解码照片中会被显示的那一块区域，并缩放到
- *      卡片实际大小，而不是把整张 4000 万像素的照片全部读进内存。
- *   2. 「主色提取」：从照片里取一个代表色，用于相册卡片的环境光晕。
+ *   1. 「按显示尺寸等比解码」（变更项 4）：先读原图宽高，按「等比完全显示」
+ *      （contain，不裁切）算出它在卡片里实际占的像素，再按这个尺寸让解码器
+ *      子采样输出——既不整张原图解码，也不会把位图放大后显示导致模糊。
+ *   2. 「主色提取」：从照片里取一个代表色，用于「加载中」占位底色。
  *
  * 【为什么按需解码很关键】
  * 屏保要长时间驻留内存。如果每次切照片都把原图整个解码（可能 30MB+），
- * 内存会频繁暴涨甚至被系统杀掉。按「显示区域 + 目标尺寸」解码后，
+ * 内存会频繁暴涨甚至被系统杀掉。按「实际显示尺寸」解码后，
  * 每张图只占几百 KB，稳定得多。
  *
  * 【资源释放的铁律】
@@ -25,12 +26,28 @@ import { fileIo } from '@kit.CoreFileKit';
 import { effectKit } from '@kit.ArkGraphics2D';
 import { display } from '@kit.ArkUI';
 import { ScreenSaverLogger } from './Logger';
+import {
+  screenSaverDecideFit,
+  screenSaverFittedSize,
+  ScreenSaverFitDecision,
+  ScreenSaverFitSize
+} from './ContentFit';
 
-// 解码目标边长的上下限：太小会糊（<64px），太大会浪费内存（>2160 即 2K 屏级）。
+// 解码目标长边的上限：太大会浪费内存（2160 即 2K 屏级），由 screenSaverFittedSize 兜底。
 const SCREEN_SAVER_DECODE_MAX_EDGE: number = 2160;
-const SCREEN_SAVER_DECODE_MIN_EDGE: number = 64;
 // 拿不到屏幕密度时的兜底值（3 倍屏是目前主流旗舰的密度）。
 const SCREEN_SAVER_FALLBACK_DENSITY: number = 3;
+
+/**
+ * 等比完整解码的结果（变更项 4）。
+ * contentWidth/contentHeight 是解出来的位图尺寸（px），decision 是「该不该有黑边」的判据结论。
+ */
+export interface ScreenSaverFittedDecode {
+  pixelMap: image.PixelMap;
+  contentWidth: number;
+  contentHeight: number;
+  decision: ScreenSaverFitDecision;
+}
 
 /**
  * vp（虚拟像素）转 px（物理像素）。
@@ -96,19 +113,27 @@ class ScreenSaverImageLoaderService {
   }
 
   /**
-   * 核心：按「目标区域 + 目标尺寸」解码照片。
+   * 核心（变更项 4）：把整张照片**等比完整解码**到「卡片里的实际显示尺寸」。
+   *
+   * 与旧的裁剪解码（decodeForRegion）的区别：
+   *   - 旧版按卡片宽高比在原图中央裁一块再缩放 —— 会**裁切**画面；
+   *   - 新版先读原图宽高，用 screenSaverFittedSize 算出「等比放进卡片显示区」
+   *     的像素尺寸（contain，绝不裁切、绝不放大），只把 desiredSize 交给解码器，
+   *     不给 desiredRegion。
+   *
    * 流程：
-   *   1. 尺寸夹取到 [64, 2160]，防止极端值；
-   *   2. 打开文件、创建解码器（ImageSource），先读原图宽高；
-   *   3. 计算居中裁剪区域：按目标宽高比在原图中间裁一块
-   *      （先假设以原图宽为准算高；如果超出原图高，再反过来以高为准算宽）；
-   *   4. 用 desiredRegion（只解码这块）+ desiredSize（缩放到目标大小）解码，
-   *      CROP_FIRST 策略表示「先裁剪再缩放」，最省内存；
+   *   1. 打开文件、创建解码器（ImageSource），读原图宽高；
+   *   2. screenSaverFittedSize(原图 → 容器) 得到解码尺寸（长边夹在 2160 以内防内存）；
+   *   3. createPixelMap({ desiredSize }) —— 解码器按目标尺寸子采样输出，
+   *      既不是整张原图，也不会小于显示尺寸导致拉伸模糊；
+   *   4. screenSaverDecideFit 给出「该不该有黑边、在哪一侧」的判据结论（供日志与验证）；
    *   5. finally 里依次释放 source 和 file。
+   *
+   * @param containerWidthPx  卡片显示区宽（px，= 卡片实际像素宽）
+   * @param containerHeightPx 卡片显示区高（px）
    */
-  async decodeForRegion(uri: string, targetWidthPx: number, targetHeightPx: number): Promise<image.PixelMap | undefined> {
-    const safeWidth = this.clampEdge(targetWidthPx);
-    const safeHeight = this.clampEdge(targetHeightPx);
+  async decodeFitted(uri: string, containerWidthPx: number,
+    containerHeightPx: number): Promise<ScreenSaverFittedDecode | undefined> {
     let file: fileIo.File | undefined = undefined;
     let source: image.ImageSource | undefined = undefined;
     try {
@@ -120,37 +145,19 @@ class ScreenSaverImageLoaderService {
       if (originWidth <= 0 || originHeight <= 0) {
         return undefined;
       }
-      // 目标宽高比 → 在原图上找一个同样比例的居中矩形
-      const targetRatio = safeWidth / safeHeight;
-      let cropWidth = originWidth;
-      let cropHeight = Math.round(originWidth / targetRatio);
-      if (cropHeight > originHeight) {
-        // 以宽为准裁出来的高度超出原图：改为以高为准
-        cropHeight = originHeight;
-        cropWidth = Math.round(originHeight * targetRatio);
-      }
-      if (cropWidth <= 0 || cropHeight <= 0) {
-        return undefined;
-      }
-      // 居中：裁剪区左上角 = (原图 - 裁剪区) / 2
-      const cropX = Math.max(0, Math.floor((originWidth - cropWidth) / 2));
-      const cropY = Math.max(0, Math.floor((originHeight - cropHeight) / 2));
-      // 输出尺寸不能超过裁剪区本身（放大没有意义）
-      const outWidth = Math.min(safeWidth, cropWidth);
-      const outHeight = Math.min(safeHeight, cropHeight);
-      const region: image.Region = {
-        size: { width: cropWidth, height: cropHeight },
-        x: cropX,
-        y: cropY
-      };
-      const decodeSize: image.Size = { width: outWidth, height: outHeight };
-      const options: image.DecodingOptions = {
-        desiredRegion: region,
-        desiredSize: decodeSize,
-        cropAndScaleStrategy: image.CropAndScaleStrategy.CROP_FIRST
-      };
+      const fitted: ScreenSaverFitSize = screenSaverFittedSize(originWidth, originHeight,
+        containerWidthPx, containerHeightPx, SCREEN_SAVER_DECODE_MAX_EDGE);
+      const decodeSize: image.Size = { width: fitted.width, height: fitted.height };
+      const options: image.DecodingOptions = { desiredSize: decodeSize };
       const pixelMap = await source.createPixelMap(options);
-      return pixelMap;
+      const decision = screenSaverDecideFit(fitted.width, fitted.height, containerWidthPx, containerHeightPx);
+      const result: ScreenSaverFittedDecode = {
+        pixelMap: pixelMap,
+        contentWidth: fitted.width,
+        contentHeight: fitted.height,
+        decision: decision
+      };
+      return result;
     } catch (err) {
       const error = err as Error;
       ScreenSaverLogger.error(`decode failed: ${error.message}, uri=${uri}`);
@@ -177,7 +184,7 @@ class ScreenSaverImageLoaderService {
   /**
    * 提取一张图的主色（返回 '#RRGGBB'）。
    * 用系统图形库 effectKit 的取色器：传入 PixelMap，拿到 RGB 主色。
-   * 相册卡片用它生成与照片呼应的环境光晕颜色。
+   * 相册卡片用它给「加载中」占位底色调色（照片显示出来后统一用黑边色）。
    * 失败返回 undefined，调用方用默认色兜底。
    */
   async extractMainColor(pixelMap: image.PixelMap): Promise<string | undefined> {
@@ -190,18 +197,6 @@ class ScreenSaverImageLoaderService {
       ScreenSaverLogger.error(`extract main color failed: ${error.message}`);
       return undefined;
     }
-  }
-
-  /** 解码边长夹取到 [64, 2160]：防糊、防浪费内存。 */
-  private clampEdge(value: number): number {
-    const rounded = Math.round(value);
-    if (rounded < SCREEN_SAVER_DECODE_MIN_EDGE) {
-      return SCREEN_SAVER_DECODE_MIN_EDGE;
-    }
-    if (rounded > SCREEN_SAVER_DECODE_MAX_EDGE) {
-      return SCREEN_SAVER_DECODE_MAX_EDGE;
-    }
-    return rounded;
   }
 
   /** 颜色通道数值 → 两位十六进制。 */

@@ -32,10 +32,13 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
-import { SCREEN_SAVER_CARD_CATALOG, screenSaverFindCardMeta } from '../cards/CardCatalog';
 import {
-  SCREEN_SAVER_CARD_MAX_COLS,
-  SCREEN_SAVER_CARD_MAX_ROWS,
+  SCREEN_SAVER_CARD_CATALOG,
+  screenSaverCardTypeName,
+  screenSaverFindCardMeta,
+  screenSaverSnapCardSize
+} from '../cards/CardCatalog';
+import {
   SCREEN_SAVER_GIT_WEEK_OPTIONS,
   SCREEN_SAVER_GRID_COLS,
   SCREEN_SAVER_GRID_ROWS,
@@ -51,6 +54,7 @@ import {
   ScreensaverLayout,
   ScreensaverRawCard,
   ScreensaverRawClock,
+  ScreensaverRawEntry,
   ScreensaverRawGit,
   ScreensaverRawGitCache,
   ScreensaverRawGitDay,
@@ -59,7 +63,10 @@ import {
   ScreensaverRawPhoto,
   ScreensaverRawSettings,
   ScreensaverRawVideo,
-  ScreensaverSettings
+  ScreensaverRawWeather,
+  ScreensaverRawWeatherCache,
+  ScreensaverSettings,
+  ScreensaverWeatherData
 } from './ConfigModels';
 
 // ---------- 持久化键名（Preferences 里的 key） ----------
@@ -69,6 +76,7 @@ const SCREEN_SAVER_LEGACY_KEY: string = 'screen_saver_config';      // 旧版本
 const SCREEN_SAVER_GUIDE_KEY: string = 'screen_saver_guide_done';   // 引导页是否已完成
 const SCREEN_SAVER_GIT_TOKEN_KEY: string = 'screen_saver_git_token';// GitHub 访问令牌
 const SCREEN_SAVER_GIT_CACHE_KEY: string = 'screen_saver_git_cache';// Git 数据离线缓存
+const SCREEN_SAVER_WEATHER_CACHE_KEY: string = 'screen_saver_weather_cache'; // 天气数据离线缓存（需求 A）
 // 保存防抖间隔：停下来 200ms 才真正写盘。
 const SCREEN_SAVER_SAVE_DEBOUNCE_MS: number = 200;
 
@@ -109,6 +117,8 @@ export class ScreensaverAppModel {
   private gitToken: string = '';
   /** Git 数据的内存缓存（离线显示用）。 */
   private gitCache: ScreensaverGitData | undefined = undefined;
+  /** 天气数据的内存缓存（离线显示用，需求 A）。 */
+  private weatherCache: ScreensaverWeatherData | undefined = undefined;
 
   /** 注入应用上下文（EntryAbility onCreate 时调用一次）。 */
   attachContext(context: common.UIAbilityContext): void {
@@ -167,6 +177,10 @@ export class ScreensaverAppModel {
       const cacheValue = await store.get(SCREEN_SAVER_GIT_CACHE_KEY, '');
       if (typeof cacheValue === 'string' && cacheValue.length > 0) {
         this.gitCache = this.parseGitCache(cacheValue);
+      }
+      const weatherCacheValue = await store.get(SCREEN_SAVER_WEATHER_CACHE_KEY, '');
+      if (typeof weatherCacheValue === 'string' && weatherCacheValue.length > 0) {
+        this.weatherCache = this.parseWeatherCache(weatherCacheValue);
       }
       const layoutText = await store.get(SCREEN_SAVER_LAYOUT_KEY, '');
       if (typeof layoutText === 'string' && layoutText.length > 0) {
@@ -239,6 +253,46 @@ export class ScreensaverAppModel {
 
   getGitCache(): ScreensaverGitData | undefined {
     return this.gitCache;
+  }
+
+  // ---------- 天气数据缓存（需求 A：离线可用） ----------
+
+  getWeatherCache(): ScreensaverWeatherData | undefined {
+    return this.weatherCache;
+  }
+
+  /** 更新天气缓存（内存 + 磁盘两份）。 */
+  setWeatherCache(data: ScreensaverWeatherData): void {
+    this.weatherCache = data;
+    const raw: ScreensaverRawWeatherCache = {
+      city: data.city,
+      tempC: data.tempC,
+      description: data.description,
+      highC: data.highC,
+      lowC: data.lowC,
+      fetchedAt: data.fetchedAt
+    };
+    void this.persistFlag(SCREEN_SAVER_WEATHER_CACHE_KEY, JSON.stringify(raw));
+  }
+
+  /** 解析磁盘上的天气缓存 JSON；解析失败返回 undefined。 */
+  private parseWeatherCache(text: string): ScreensaverWeatherData | undefined {
+    try {
+      const raw = JSON.parse(text) as ScreensaverRawWeatherCache;
+      const data: ScreensaverWeatherData = {
+        city: raw.city ?? '',
+        tempC: raw.tempC ?? 0,
+        description: raw.description ?? '',
+        highC: raw.highC ?? 0,
+        lowC: raw.lowC ?? 0,
+        fetchedAt: raw.fetchedAt ?? 0
+      };
+      return data;
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`weather cache parse failed: ${error.message}`);
+      return undefined;
+    }
   }
 
   /** 更新 Git 离线缓存（内存 + 磁盘两份）。 */
@@ -389,28 +443,154 @@ export class ScreensaverAppModel {
   }
 
   /**
-   * 缩放卡片到指定跨度：先按卡片类型的最小/最大值夹取，
-   * 再保证缩放后不越出网格右下边界（必要时起点左移/上移），最后尝试放置。
+   * 拉伸预览：把「吸附后的矩形」直接写到卡片上（只改内存、不落盘）。
+   *
+   * 为什么让预览也改模型：card.colSpan/rowSpan 是 @Trace 字段，
+   * 卡片视图与 GridItem 都直接依赖它们——写进去之后：
+   *   - 格子实时变大变小；
+   *   - 卡片内容按新尺寸重新排版（尺寸矩阵查表得到的新密度档立即生效）；
+   *   - 不依赖 ForEach/@Builder 的按值传参刷新（那条路在复用时不刷新）。
+   * 返回值 = 该矩形是否合法（false 时由调用方描红边、松手回滚）。
+   */
+  previewCardRect(cardId: string, colStart: number, rowStart: number, colSpan: number, rowSpan: number): boolean {
+    const card = this.cardById(cardId);
+    if (card === undefined) {
+      return false;
+    }
+    card.colStart = colStart;
+    card.rowStart = rowStart;
+    card.colSpan = colSpan;
+    card.rowSpan = rowSpan;
+    if (card.floating) {
+      return true; // 悬浮卡不占网格，没有重叠问题（需求 B）
+    }
+    return this.canPlace(cardId, colStart, rowStart, colSpan, rowSpan);
+  }
+
+  /**
+   * 结束拉伸预览：
+   * accept=true → 保留当前矩形并落盘；
+   * accept=false → 回滚到拖动前的矩形（origin* 参数）并落盘。
+   */
+  endCardRectPreview(cardId: string, originColStart: number, originRowStart: number,
+    originColSpan: number, originRowSpan: number, accept: boolean): void {
+    const card = this.cardById(cardId);
+    if (card === undefined) {
+      return;
+    }
+    if (!accept) {
+      card.colStart = originColStart;
+      card.rowStart = originRowStart;
+      card.colSpan = originColSpan;
+      card.rowSpan = originRowSpan;
+    }
+    this.save();
+  }
+
+  /**
+   * 缩放卡片到指定跨度。
+   *
+   * 与旧实现的关键区别：**非法尺寸会被吸附到最近的合法值**（见尺寸矩阵），
+   * 而不是简单夹取上下限。例如时钟没有 3×3 这一档时，请求 3×3 会吸附到
+   * 4×3（距离最近、面积更大）——保证「矩阵里没有的尺寸永远不会落库」。
+   * 之后再保证不越出网格右下边界（必要时把起点左移/上移），最后尝试放置。
    */
   resizeCardTo(cardId: string, colSpan: number, rowSpan: number): boolean {
     const card = this.cardById(cardId);
     if (card === undefined) {
       return false;
     }
-    const meta = screenSaverFindCardMeta(card.cardType);
-    const minCols = meta !== undefined ? meta.minColSpan : SCREEN_SAVER_CARD_MAX_COLS;
-    const minRows = meta !== undefined ? meta.minRowSpan : 1;
-    const maxCols = meta !== undefined ? meta.maxColSpan : SCREEN_SAVER_CARD_MAX_COLS;
-    const maxRows = meta !== undefined ? meta.maxRowSpan : SCREEN_SAVER_CARD_MAX_ROWS;
-    const nextColSpan = screenSaverClampInt(colSpan, minCols, maxCols);
-    const nextRowSpan = screenSaverClampInt(rowSpan, minRows, maxRows);
-    if (nextColSpan === card.colSpan && nextRowSpan === card.rowSpan) {
+    const entry = screenSaverSnapCardSize(card.cardType, colSpan, rowSpan,
+      SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
+    if (entry.colSpan === card.colSpan && entry.rowSpan === card.rowSpan) {
       return false;
     }
+    if (card.floating) {
+      // 悬浮卡不占网格：只改跨度（决定悬浮卡的显示尺寸），不参与碰撞校验
+      card.colSpan = entry.colSpan;
+      card.rowSpan = entry.rowSpan;
+      this.save();
+      return true;
+    }
     // 靠右/靠下的卡片放大后可能越界：把起点往回拉，保证不超出网格。
-    const nextColStart = Math.min(card.colStart, SCREEN_SAVER_GRID_COLS - nextColSpan);
-    const nextRowStart = Math.min(card.rowStart, SCREEN_SAVER_GRID_ROWS - nextRowSpan);
-    return this.placeCard(cardId, nextColStart, nextRowStart, nextColSpan, nextRowSpan);
+    const nextColStart = Math.max(0, Math.min(card.colStart, SCREEN_SAVER_GRID_COLS - entry.colSpan));
+    const nextRowStart = Math.max(0, Math.min(card.rowStart, SCREEN_SAVER_GRID_ROWS - entry.rowSpan));
+    return this.placeCard(cardId, nextColStart, nextRowStart, entry.colSpan, entry.rowSpan);
+  }
+
+  /**
+   * 设置/取消「悬浮层」（需求 B）。
+   *
+   * 与缺陷 1 的关系：悬浮卡与网格卡是同一个 ScreensaverCardInstance，
+   * 唯一标识仍然是 card.id——选中、面板、拖动、缩放、删除、持久化全部走它，
+   * 不引入第二套实例标识，因此不会再出现「操作落到别的卡片上」。
+   *
+   * 返回空串表示成功，否则返回给用户看的原因（悬浮卡不占网格，因此
+   * 「转回网格」时必须有空位，没空位就保持悬浮并说明原因）。
+   */
+  setCardFloating(cardId: string, floating: boolean): string {
+    const card = this.cardById(cardId);
+    if (card === undefined) {
+      return '卡片不存在';
+    }
+    if (card.cardType !== 'clock') {
+      return '当前仅支持时钟卡片悬浮';
+    }
+    if (card.floating === floating) {
+      return '';
+    }
+    if (floating) {
+      card.floating = true;
+      card.floatLocked = false;
+      // 首次悬浮时把位置放在原网格坐标处，视觉上「原地浮起」
+      if (card.floatX <= 0 && card.floatY <= 0) {
+        card.floatX = 12;
+        card.floatY = 12;
+      }
+      this.save();
+      return '';
+    }
+    // 回到网格：找一个放得下的空位（悬浮卡本身不占格，findFreeSlot 会跳过它）
+    const slot = this.findFreeSlot(card.colSpan, card.rowSpan);
+    if (slot === undefined) {
+      return '空间不足：请先移出或缩小其他卡片，再取消悬浮';
+    }
+    card.floating = false;
+    card.floatLocked = false;
+    card.colStart = slot.colStart;
+    card.rowStart = slot.rowStart;
+    this.save();
+    return '';
+  }
+
+  /**
+   * 设置悬浮位置（vp，相对画布左上）。会按画布尺寸夹取，保证整卡可见。
+   * canvasW/canvasH 由界面在量到网格尺寸后传进来（模型不持有像素尺寸）。
+   */
+  setFloatPosition(cardId: string, x: number, y: number, canvasW: number, canvasH: number): boolean {
+    const card = this.cardById(cardId);
+    if (card === undefined || !card.floating) {
+      return false;
+    }
+    if (card.floatLocked) {
+      return false;
+    }
+    const cardW = canvasW * card.colSpan / SCREEN_SAVER_GRID_COLS;
+    const cardH = canvasH * card.rowSpan / SCREEN_SAVER_GRID_ROWS;
+    card.floatX = Math.max(0, Math.min(Math.round(x), Math.max(0, canvasW - cardW)));
+    card.floatY = Math.max(0, Math.min(Math.round(y), Math.max(0, canvasH - cardH)));
+    this.save();
+    return true;
+  }
+
+  /** 锁定/解锁悬浮位置（锁定后编辑态的拖动不再改变位置）。 */
+  setFloatLocked(cardId: string, locked: boolean): void {
+    const card = this.cardById(cardId);
+    if (card === undefined || !card.floating || card.floatLocked === locked) {
+      return;
+    }
+    card.floatLocked = locked;
+    this.save();
   }
 
   /**
@@ -430,7 +610,9 @@ export class ScreensaverAppModel {
     card.rowStart = rowStart;
     card.colSpan = colSpan;
     card.rowSpan = rowSpan;
-    this.applyClockSizeConstraint(card);
+    // 注意：这里不再强制改写时钟卡的格式（旧 applyClockSizeConstraint 的行为）。
+    // 小尺寸下「只显示时间」改由尺寸矩阵的密度变体在渲染层实现，
+    // 不再静默修改用户选择的配置。
     this.save();
     return true;
   }
@@ -466,6 +648,9 @@ export class ScreensaverAppModel {
       if (card.id === cardId) {
         continue; // 自己不算和自己撞
       }
+      if (card.floating) {
+        continue; // 悬浮卡不占网格单元，不参与碰撞（需求 B）
+      }
       const overlaps = colStart < card.colStart + card.colSpan && colStart + colSpan > card.colStart &&
         rowStart < card.rowStart + card.rowSpan && rowStart + rowSpan > card.rowStart;
       if (overlaps) {
@@ -497,6 +682,18 @@ export class ScreensaverAppModel {
     const colFactor = columns / SCREEN_SAVER_GRID_COLS;
     const rowFactor = rows / SCREEN_SAVER_GRID_ROWS;
     for (const card of this.layout.cards) {
+      if (card.floating) {
+        // 悬浮卡不占新网格：保留一个同下标占位项（沿用存储坐标），
+        // 保证 widePositions 与 layout.cards 的下标仍然一一对应。
+        const floatPos: ScreensaverGridPos = {
+          colStart: card.colStart,
+          rowStart: card.rowStart,
+          colSpan: card.colSpan,
+          rowSpan: card.rowSpan
+        };
+        result.push(floatPos);
+        continue;
+      }
       // 跨度按比例四舍五入，并夹在新网格范围内。
       let spanCols = Math.max(1, Math.min(columns, Math.round(card.colSpan * colFactor)));
       let spanRows = Math.max(1, Math.min(rows, Math.round(card.rowSpan * rowFactor)));
@@ -578,6 +775,9 @@ export class ScreensaverAppModel {
       for (let col = 0; col <= SCREEN_SAVER_GRID_COLS - colSpan; col++) {
         let free = true;
         for (const card of this.layout.cards) {
+          if (card.floating) {
+            continue; // 悬浮卡不占网格（需求 B）
+          }
           const overlaps = col < card.colStart + card.colSpan && col + colSpan > card.colStart &&
             row < card.rowStart + card.rowSpan && row + rowSpan > card.rowStart;
           if (overlaps) {
@@ -631,17 +831,12 @@ export class ScreensaverAppModel {
   }
 
   /**
-   * 时钟卡的业务规则：格子数不足 4 个（如 1×2）时强制纯时间格式——
-   * 空间太小塞不下日期行，显示会挤成一团。
+   * 时钟卡的小尺寸显示规则（旧实现）说明：
+   * 过去在 1×2 这类小尺寸下会直接把 clock.format 改写成 'timeOnly'，
+   * 属于「静默改用户配置」。现在改由尺寸矩阵的密度变体在渲染层降级
+   * （见 CardCatalog 的 CLOCK_SIZE_SPEC 与 ClockCardView），
+   * 配置本身始终保持用户选择的值。
    */
-  private applyClockSizeConstraint(card: ScreensaverCardInstance): void {
-    if (card.cardType !== 'clock') {
-      return;
-    }
-    if (card.colSpan * card.rowSpan < 4) {
-      card.clock.format = 'timeOnly';
-    }
-  }
 
   // =====================================================================
   // 磁盘 → 内存（Raw 校验转换）
@@ -720,13 +915,20 @@ export class ScreensaverAppModel {
     this.layout.cards = accepted;
   }
 
-  /** 检查候选卡是否越界或与已接受列表中的卡重叠。 */
+  /**
+   * 检查候选卡是否越界或与已接受列表中的卡重叠。
+   * 悬浮卡不占网格单元 → 不参与重叠判定（与 canPlace / findFreeSlot 规则保持一致，
+   * 否则「悬浮钟所在格子里正常摆放的卡片」会在下次启动被误判为重叠而丢弃）。
+   */
   private canPlaceInList(cards: ScreensaverCardInstance[], candidate: ScreensaverCardInstance): boolean {
     if (candidate.colStart + candidate.colSpan > SCREEN_SAVER_GRID_COLS ||
       candidate.rowStart + candidate.rowSpan > SCREEN_SAVER_GRID_ROWS) {
       return false;
     }
     for (const card of cards) {
+      if (card.floating) {
+        continue;
+      }
       const overlaps = candidate.colStart < card.colStart + card.colSpan &&
         candidate.colStart + candidate.colSpan > card.colStart &&
         candidate.rowStart < card.rowStart + card.rowSpan &&
@@ -747,21 +949,29 @@ export class ScreensaverAppModel {
     if (cardType === undefined) {
       return undefined;
     }
-    const meta = screenSaverFindCardMeta(cardType);
-    const maxCols = meta !== undefined ? meta.maxColSpan : SCREEN_SAVER_CARD_MAX_COLS;
-    const maxRows = meta !== undefined ? meta.maxRowSpan : SCREEN_SAVER_CARD_MAX_ROWS;
     const card = new ScreensaverCardInstance();
     card.id = (rawCard.id !== undefined && rawCard.id.length > 0) ? rawCard.id : screenSaverGenerateId('card');
     card.cardType = cardType;
     card.enabled = rawCard.enabled ?? true;
-    card.colSpan = screenSaverClampInt(rawCard.colSpan ?? 2, 1, maxCols);
-    card.rowSpan = screenSaverClampInt(rawCard.rowSpan ?? 2, 1, maxRows);
+    // 磁盘上的跨度可能来自旧版本（比如 3×1 这类矩阵里没有的尺寸）：
+    // 统一走「吸附到最近合法值」，旧布局自动被纠正且卡片不丢。
+    const entry = screenSaverSnapCardSize(cardType, rawCard.colSpan ?? 2, rawCard.rowSpan ?? 2,
+      SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
+    card.colSpan = entry.colSpan;
+    card.rowSpan = entry.rowSpan;
     card.colStart = screenSaverClampInt(rawCard.colStart ?? 0, 0, SCREEN_SAVER_GRID_COLS - card.colSpan);
     card.rowStart = screenSaverClampInt(rawCard.rowStart ?? 0, 0, SCREEN_SAVER_GRID_ROWS - card.rowSpan);
+    // 浮层字段（需求 B）：旧数据没有这些字段 → 默认 false/0/0/false，即旧行为。
+    card.floating = rawCard.floating ?? false;
+    card.floatX = Math.max(0, Math.round(rawCard.floatX ?? 0));
+    card.floatY = Math.max(0, Math.round(rawCard.floatY ?? 0));
+    card.floatLocked = rawCard.floatLocked ?? false;
     this.applyRawClock(card, rawCard.clock);
     this.applyRawPhoto(card, rawCard.photo);
     this.applyRawVideo(card, rawCard.video);
     this.applyRawGit(card, rawCard.git);
+    this.applyRawWeather(card, rawCard.weather);
+    this.applyRawEntry(card, rawCard.entry);
     return card;
   }
 
@@ -778,6 +988,12 @@ export class ScreensaverAppModel {
     }
     if (value === 'git') {
       return 'git';
+    }
+    if (value === 'weather') {
+      return 'weather';
+    }
+    if (value === 'entry') {
+      return 'entry';
     }
     return undefined;
   }
@@ -874,6 +1090,41 @@ export class ScreensaverAppModel {
     card.git.offlineCache = rawGit.offlineCache ?? true;
   }
 
+  /**
+   * Raw 天气配置 → 严格配置（需求 A）。
+   * enabled 默认 false：旧数据 / 新卡片都不会默认联网，必须用户显式打开。
+   */
+  private applyRawWeather(card: ScreensaverCardInstance, rawWeather: ScreensaverRawWeather | undefined): void {
+    if (rawWeather === undefined) {
+      return;
+    }
+    const city = rawWeather.city;
+    if (city !== undefined && city.length > 0) {
+      card.weather.city = city;
+    }
+    const latitude = rawWeather.latitude;
+    if (latitude !== undefined && Number.isFinite(latitude)) {
+      card.weather.latitude = latitude;
+    }
+    const longitude = rawWeather.longitude;
+    if (longitude !== undefined && Number.isFinite(longitude)) {
+      card.weather.longitude = longitude;
+    }
+    card.weather.enabled = rawWeather.enabled ?? false;
+    card.weather.offlineCache = rawWeather.offlineCache ?? true;
+    card.weather.unitCelsius = rawWeather.unitCelsius ?? true;
+  }
+
+  /** Raw 应用入口配置 → 严格配置（需求 A）。 */
+  private applyRawEntry(card: ScreensaverCardInstance, rawEntry: ScreensaverRawEntry | undefined): void {
+    if (rawEntry === undefined) {
+      return;
+    }
+    card.entry.displayName = rawEntry.displayName ?? '';
+    card.entry.link = rawEntry.link ?? '';
+    card.entry.subtitle = rawEntry.subtitle ?? '';
+  }
+
   // =====================================================================
   // 内存 → 磁盘（序列化）
   // =====================================================================
@@ -931,6 +1182,19 @@ export class ScreensaverAppModel {
         palette: card.git.palette,
         offlineCache: card.git.offlineCache
       };
+      const rawWeather: ScreensaverRawWeather = {
+        city: card.weather.city,
+        latitude: card.weather.latitude,
+        longitude: card.weather.longitude,
+        enabled: card.weather.enabled,
+        offlineCache: card.weather.offlineCache,
+        unitCelsius: card.weather.unitCelsius
+      };
+      const rawEntry: ScreensaverRawEntry = {
+        displayName: card.entry.displayName,
+        link: card.entry.link,
+        subtitle: card.entry.subtitle
+      };
       const rawCard: ScreensaverRawCard = {
         id: card.id,
         cardType: card.cardType,
@@ -939,10 +1203,16 @@ export class ScreensaverAppModel {
         rowStart: card.rowStart,
         colSpan: card.colSpan,
         rowSpan: card.rowSpan,
+        floating: card.floating,
+        floatX: card.floatX,
+        floatY: card.floatY,
+        floatLocked: card.floatLocked,
         clock: rawClock,
         photo: rawPhoto,
         video: rawVideo,
-        git: rawGit
+        git: rawGit,
+        weather: rawWeather,
+        entry: rawEntry
       };
       rawCards.push(rawCard);
     }
@@ -1010,16 +1280,8 @@ export class ScreensaverAppModel {
    */
   cardInstanceSummary(card: ScreensaverCardInstance): string {
     if (card.cardType === 'clock') {
-      if (card.clock.format === 'timeOnly') {
-        return '纯时间';
-      }
-      if (card.clock.format === 'dateOnly') {
-        return '纯日期';
-      }
-      if (card.clock.format === 'lunar') {
-        return '农历';
-      }
-      return '时间 + 日期';
+      const base = this.clockFormatSummary(card);
+      return card.floating ? `${base} · 悬浮` : base;
     }
     if (card.cardType === 'photo') {
       const count = card.photo.uris.length;
@@ -1032,7 +1294,52 @@ export class ScreensaverAppModel {
       }
       return card.video.playing ? '播放中' : '显示封面帧';
     }
+    if (card.cardType === 'weather') {
+      if (card.weather.city.length === 0) {
+        return '未设置城市';
+      }
+      return card.weather.enabled ? `${card.weather.city} · 已开启` : `${card.weather.city} · 未开启`;
+    }
+    if (card.cardType === 'entry') {
+      if (card.entry.displayName.length === 0) {
+        return '未配置入口';
+      }
+      return card.entry.link.length > 0 ? card.entry.displayName : `${card.entry.displayName} · 未填链接`;
+    }
     return `@${card.git.username} · ${card.git.weeks} 周`;
+  }
+
+  /**
+   * 卡片实例的显示标题：同类型有多张时加序号（「相册 1」「相册 2」），
+   * 只有一张时用类型名。
+   *
+   * 首页列表与四个设置面板共用这一个方法——设置面板标题因此能唯一指认
+   * 自己正在编辑哪张卡片，是「操作落到别的卡片上」这类问题的肉眼可见凭证。
+   */
+  cardInstanceTitle(card: ScreensaverCardInstance): string {
+    const name = screenSaverCardTypeName(card.cardType);
+    const sameType = this.cardsOfType(card.cardType);
+    if (sameType.length > 1) {
+      const index = sameType.findIndex((item: ScreensaverCardInstance): boolean => item.id === card.id);
+      if (index >= 0) {
+        return `${name} ${index + 1}`;
+      }
+    }
+    return name;
+  }
+
+  /** 时钟卡的格式摘要文案（首页列表用）。 */
+  private clockFormatSummary(card: ScreensaverCardInstance): string {
+    if (card.clock.format === 'timeOnly') {
+      return '纯时间';
+    }
+    if (card.clock.format === 'dateOnly') {
+      return '纯日期';
+    }
+    if (card.clock.format === 'lunar') {
+      return '农历';
+    }
+    return '时间 + 日期';
   }
 
   /** 卡片类型目录（卡片库页面遍历渲染用）。 */

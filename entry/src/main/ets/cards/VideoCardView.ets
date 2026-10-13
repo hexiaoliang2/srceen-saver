@@ -27,7 +27,9 @@
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverVideoThumb } from '../common/VideoThumb';
-import { ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
+import { screenSaverResolveDensity } from './CardCatalog';
+import { SCREEN_SAVER_COLORS } from '../common/ScreenSaverStyle';
+import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
 
 @ComponentV2
 export struct ScreensaverVideoCard {
@@ -35,8 +37,22 @@ export struct ScreensaverVideoCard {
   @Param cardMode: ScreensaverCardMode = 'play';
   /** 屏保在前台时为 true：后台时立即停止播放（省电流控）。 */
   @Param cardActive: boolean = true;
+  /**
+   * 是否处于「设置面板置预览」：预览也需要能验证视频本身（变更项 3）。
+   * 为 true 时允许在 cardMode==='edit' 下播放，入口就是面板里的「播放视频」开关。
+   */
+  @Param previewActive: boolean = false;
   /** 请求打开配置面板（「重选」按钮冒泡给父组件）。 */
   @Event onRequestConfig: () => void = (): void => {};
+
+  /**
+   * 当前尺寸对应的内容密度档（尺寸矩阵查表得到）。
+   * 直接读 card 的跨度而不是父组件透传的 @Param：@Trace 字段变化会立即
+   * 触发本视图重算，不受 ForEach 复用/@Builder 按值传参的影响。
+   */
+  private density(): ScreensaverCardDensity {
+    return screenSaverResolveDensity(this.card.cardType, this.card.colSpan, this.card.rowSpan);
+  }
 
   // ---------- 渲染状态 ----------
   @Local coverPath: string = '';        // 封面帧缓存文件路径
@@ -54,13 +70,14 @@ export struct ScreensaverVideoCard {
 
   /** 组件销毁：停止播放（离开屏保页面时最关键的省电动作）。 */
   aboutToDisappear(): void {
-    this.stopPlayback();
+    this.pausePlayback();
   }
 
-  /** 换了视频：先停旧播放，重新生成封面帧。 */
+  /** 换了视频：先停旧播放，重新生成封面帧（新视频不继承「播放」开关）。 */
   @Monitor('card.video.uri')
   onUriChanged(): void {
-    this.stopPlayback();
+    this.pausePlayback();
+    this.card.video.playing = false;
     this.prepared = false;
     void this.prepareSource();
   }
@@ -71,11 +88,11 @@ export struct ScreensaverVideoCard {
     this.syncPlayback();
   }
 
-  /** 退后台：立即停止播放。 */
+  /** 退后台：立即暂停播放。 */
   @Monitor('cardActive')
   onActiveChanged(): void {
     if (!this.cardActive) {
-      this.stopPlayback();
+      this.pausePlayback();
     }
   }
 
@@ -111,27 +128,37 @@ export struct ScreensaverVideoCard {
   }
 
   /**
-   * 播放同步：四个条件全满足才真正 start——
-   * 开关打开 + 播放模式 + 屏保在前台 + 播放器已就绪。
+   * 播放同步（变更项 3 后的触发条件）：
+   *   playing 开关打开 且（屏保展示态且在前台 或 处于设置面板预览）且 播放器已就绪。
    * 任何条件不满足一律 pause（宁可保守，不可偷跑解码）。
+   *
+   * 注意：这里**不依赖卡片上的按钮**——屏保态的播放入口是「单击卡片」
+   * （由 ScreensaverPage.handlePlayModeCardTap 统一分发，改 playing 开关），
+   * 编辑态/面板预览的入口是设置面板里的「播放视频」开关。
    */
   private syncPlayback(): void {
-    if (this.card.video.playing && this.cardMode === 'play' && this.cardActive && this.prepared) {
+    const contextActive = (this.cardMode === 'play' && this.cardActive) || this.previewActive;
+    if (this.card.video.playing && contextActive && this.prepared) {
+      ScreenSaverLogger.info(`video start uri=${this.card.video.uri} preview=${this.previewActive}`);
       this.controller.start();
     } else {
       this.controller.pause();
     }
   }
 
-  /** 停止播放并把开关复位（组件销毁/退后台/换视频时调用）。 */
-  private stopPlayback(): void {
+  /**
+   * 暂停播放（缺陷 4 修正点）。
+   *
+   * 只暂停，**不把 card.video.playing 写回 false**：离开屏保、切后台、组件销毁
+   * 这些都是「临时状态」，用户打开的「播放视频」偏好应当保留，回到屏保后
+   * 按原设置继续播。旧实现在这里顺手把 playing 置 false 并落盘，等于用户
+   * 每次退出屏保就被静默改了一次配置。
+   */
+  private pausePlayback(): void {
     try {
-      this.controller.stop();
+      this.controller.pause();
     } catch (err) {
-      ScreenSaverLogger.warn('video stop failed');
-    }
-    if (this.card.video.playing) {
-      this.card.video.playing = false;
+      ScreenSaverLogger.warn('video pause failed');
     }
   }
 
@@ -155,29 +182,50 @@ export struct ScreensaverVideoCard {
   }
 
   /**
-   * 界面结构（Stack 分层）：
-   *   1. Video 组件（有视频且可用时）：关闭控制条/自动播放，默认显示封面预览；
-   *   2. 「未选择视频」占位；
-   *   3. 「视频不可用」占位（含编辑态「重选」按钮）。
+   * 封面帧的 URI 形式。
+   * Video 组件的 src / previewUri 都走 URI 解析：沙箱文件必须带 file:// 前缀，
+   * 只给纯路径会被当成「找不到的 base path」从而显示黑屏。
+   */
+  private coverUri(): string {
+    if (this.coverPath.length === 0) {
+      return '';
+    }
+    if (this.coverPath.startsWith('file://')) {
+      return this.coverPath;
+    }
+    return `file://${this.coverPath}`;
+  }
+
+  /**
+   * 界面结构（Stack 分层）——变更项 3 之后不再有任何常驻控件层：
+   *   1. Video 组件（有视频且可用时）：关闭控制条/自动播放，不播放时显示封面帧；
+   *      objectFit=Contain → 画面等比完整显示，不裁切，比例不一致时露黑边（同变更项 4）；
+   *   2. 「未选择视频」占位（极简档压成一行小字，避免 1×1 里文字溢出）；
+   *   3. 「视频不可用」占位（含编辑态「重选」按钮，仅完整档显示按钮）。
+   *
+   * 已移除：卡片正中的播放/停止按钮与半透明遮罩层（原「▶/❚❚」角标）。
+   * 播放入口改为：屏保展示态单击卡片（ScreensaverPage 统一分发）；
+   * 编辑态/面板预览用设置面板里的「播放视频」开关。
    */
   build() {
     Stack() {
       if (this.card.video.uri.length > 0 && !this.unavailable) {
         Video({
           src: this.card.video.uri,
-          // previewUri：播放前的预览图（封面帧缓存），不播放时看到的就是它
-          previewUri: this.coverPath.length > 0 ? this.coverPath : undefined,
+          // previewUri：播放前的预览图（封面帧缓存，需 file:// 前缀），不播放时看到的就是它
+          previewUri: this.coverUri().length > 0 ? this.coverUri() : undefined,
           controller: this.controller
         })
           .autoPlay(false)   // 永不自动播放，由 syncPlayback 统一控制
           .controls(false)   // 屏保上不要系统控制条
           .loop(this.card.video.loop)
           .muted(this.card.video.muted)
-          .objectFit(ImageFit.Cover)
+          .objectFit(ImageFit.Contain)
           .width('100%')
           .height('100%')
           .onPrepared((): void => {
             // 播放器就绪后才能 start；如果开关已经打开，这里立即开始播
+            ScreenSaverLogger.info('video component prepared');
             this.prepared = true;
             this.syncPlayback();
           })
@@ -193,29 +241,39 @@ export struct ScreensaverVideoCard {
           })
       }
       if (this.emptyVisible) {
-        Column({ space: 4 }) {
-          Text('未选择视频')
-            .fontSize(13)
-            .fontColor('#B3B3B3')
-          Text('在配置中选择本地视频')
-            .fontSize(11)
-            .fontColor('#6E6E73')
+        if (this.density() === 'minimal') {
+          // 1×1 这类极小尺寸只留一行提示，保证「不是空白」且不溢出
+          Text('无视频')
+            .fontSize(10)
+            .fontColor('#8C8C8C')
+        } else {
+          Column({ space: 4 }) {
+            Text('未选择视频')
+              .fontSize(this.density() === 'compact' ? 11 : 13)
+              .fontColor('#B3B3B3')
+            if (this.density() === 'full') {
+              Text('在配置中选择本地视频')
+                .fontSize(11)
+                .fontColor('#6E6E73')
+            }
+          }
+          .width('100%')
+          .height('100%')
+          .justifyContent(FlexAlign.Center)
         }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor('#0A0A0C')
       }
       if (this.unavailable) {
         Column({ space: 6 }) {
           Text('视频不可用')
-            .fontSize(13)
+            .fontSize(this.density() === 'minimal' ? 10 : (this.density() === 'compact' ? 11 : 13))
             .fontColor('#B3B3B3')
-          Text('文件已被删除 · 请在配置中重新选择')
-            .fontSize(11)
-            .fontColor('#6E6E73')
-          // 「重选」只在编辑态显示（播放态保持不可交互的纯净观感）
-          if (this.cardMode === 'edit') {
+          if (this.density() === 'full') {
+            Text('文件已被删除 · 请在配置中重新选择')
+              .fontSize(11)
+              .fontColor('#6E6E73')
+          }
+          // 「重选」只在编辑态 + 完整档显示（小尺寸放不下按钮，整卡点按仍可进配置）
+          if (this.cardMode === 'edit' && this.density() === 'full') {
             Column() {
               Text('重选')
                 .fontSize(12)
@@ -234,12 +292,11 @@ export struct ScreensaverVideoCard {
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
-        .backgroundColor('#0A0A0C')
       }
     }
     .width('100%')
     .height('100%')
     .clip(true)
-    .backgroundColor('#0A0A0C')
+    .backgroundColor(SCREEN_SAVER_COLORS.cardSurface)
   }
 }

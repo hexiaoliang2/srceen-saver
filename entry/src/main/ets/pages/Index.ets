@@ -36,7 +36,6 @@
 import { ScreenSaverLogger } from '../common/Logger';
 import { SCREEN_SAVER_COLORS } from '../common/ScreenSaverStyle';
 import { screenSaverAppModel } from '../model/AppModel';
-import { screenSaverCardTypeName } from '../cards/CardCatalog';
 import { ScreensaverCardHost } from '../cards/CardHost';
 import { ScreenSaverPlayPage } from '../screensaver/ScreensaverPage';
 import { ScreenSaverSettingsPage } from '../screensaver/SettingsPage';
@@ -58,19 +57,11 @@ struct ScreenSaverConsole {
   }
 
   /**
-   * 卡片显示名：默认用类型名（如「时钟」）；
-   * 同类型有多张时加序号（「相册 1」「相册 2」），用户好区分。
+   * 卡片显示名：委托给 AppModel.cardInstanceTitle（与设置面板共用同一套
+   * 命名规则），同类型有多张时自动带序号。
    */
   private cardTitle(card: ScreensaverCardInstance): string {
-    const name = screenSaverCardTypeName(card.cardType);
-    const sameType = screenSaverAppModel.cardsOfType(card.cardType);
-    if (sameType.length > 1) {
-      const index = sameType.findIndex((item: ScreensaverCardInstance): boolean => item.id === card.id);
-      if (index >= 0) {
-        return `${name} ${index + 1}`;
-      }
-    }
-    return name;
+    return screenSaverAppModel.cardInstanceTitle(card);
   }
 
   /** 弹 toast 提示。 */

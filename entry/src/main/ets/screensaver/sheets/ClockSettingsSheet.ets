@@ -7,10 +7,13 @@
  * 时钟卡片的设置抽屉：实时预览 + 格式（时间+日期/纯时间/纯日期/农历）、
  * 12/24 小时制、显示秒、字号档位、尺寸预设、删除卡片。
  *
- * 【最特殊的业务规则：2×1 最小尺寸只支持「纯时间」】
- * 2×1 格子太小，放不下日期/农历，所以：
- *   - setFormat()：最小尺寸下选其它格式会被拦截并 toast 提示；
- *   - 界面上：chipEnabled 让不可用的格式胶囊直接置灰。
+ * 【小尺寸怎么处理（缺陷 3 之后的新规则）】
+ * 尺寸矩阵（CardCatalog 的 CLOCK_SIZE_SPEC）给每个跨度定义了内容密度：
+ *   - minimal（1×1/2×1/3×1）：只渲染时间；
+ *   - compact（4×1/1×2/2×2）：时间 + 一行日期；
+ *   - full（2×3/4×2/4×3/4×4）：时间 + 日期·农历（遵循下面选的格式）。
+ * 格式选择**不再被拦截**，用户选什么就存什么，放大卡片后自动生效；
+ * 面板下方用一行小字说明「当前尺寸决定的显示档位」。
  *
  * 【统一交互模式】
  * 每次改动 → 改 card 上的字段（@ObservedV2 自动刷新预览）→ applyChange()
@@ -22,14 +25,21 @@
  * =============================================================================
  */
 
-import { ScreenSaverChip, ScreenSaverDeleteCardRow, ScreenSaverSheetHeader, ScreenSaverToggleRow } from '../../common/SheetParts';
+import {
+  ScreenSaverChip,
+  ScreenSaverDeleteCardRow,
+  ScreenSaverSheetHeader,
+  ScreenSaverSizePresetRow,
+  ScreenSaverToggleRow
+} from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
-import { screenSaverFindCardMeta } from '../../cards/CardCatalog';
+import { screenSaverResolveDensity, screenSaverSizePresets } from '../../cards/CardCatalog';
 import { ScreensaverClockCard } from '../../cards/ClockCardView';
 import {
   ClockFormat,
+  ScreensaverCardDensity,
   ScreensaverCardInstance,
   ScreensaverNumberOption,
   ScreensaverSizePreset
@@ -65,11 +75,12 @@ export struct ScreenSaverClockSettingsPanel {
   @Event onDelete: () => void = (): void => {};
 
   /**
-   * 是否为最小尺寸（面积 < 4 格，即 2×1）。
-   * 最小尺寸只支持纯时间格式，见 setFormat() 的拦截逻辑。
+   * 当前尺寸的内容密度档（尺寸矩阵查表得到）。
+   * 用来告诉用户「为什么现在只显示时间」——是尺寸决定的渲染降级，
+   * 而不是把他的格式设置改掉了。
    */
-  private isMinimal(): boolean {
-    return this.card.colSpan * this.card.rowSpan < 4;
+  private density(): ScreensaverCardDensity {
+    return screenSaverResolveDensity(this.card.cardType, this.card.colSpan, this.card.rowSpan);
   }
 
   /** 改动后的统一收尾：持久化到磁盘。 */
@@ -78,15 +89,20 @@ export struct ScreenSaverClockSettingsPanel {
   }
 
   /**
+   * 面板标题：带实例标识（如「时钟 · 设置」「相册 1 · 设置」）。
+   * 缺陷 1 的验收要求「面板显示且仅显示该卡片的数据」，
+   * 标题里写明是哪张卡片，肉眼即可核对。
+   */
+  private panelTitle(): string {
+    return `${screenSaverAppModel.cardInstanceTitle(this.card)} · 设置`;
+  }
+
+  /**
    * 切换显示格式。
-   * 最小尺寸（2×1）下除「纯时间」以外的格式都被拦截——
-   * 小格子放不下日期/农历，硬塞会溢出或字号过小。
+   * 小尺寸下不再拦截点击：尺寸矩阵会决定实际渲染密度（极简/紧凑/完整），
+   * 用户的格式选择照常保存，等卡片放大后自然生效。
    */
   private setFormat(format: ClockFormat): void {
-    if (this.isMinimal() && format !== 'timeOnly') {
-      this.toast('2×1 尺寸仅支持纯时间，请先调整尺寸');
-      return;
-    }
     this.card.clock.format = format;
     this.applyChange();
   }
@@ -112,11 +128,23 @@ export struct ScreenSaverClockSettingsPanel {
     }
   }
 
+  /**
+   * 切换「悬浮层」（需求 B）：
+   * 悬浮后卡片不占网格单元、始终渲染在其他卡片之上，位置在编辑态直接拖动。
+   * 取消悬浮时若网格没有空位，模型会返回原因，这里 toast 出来并保持悬浮。
+   */
+  private setFloating(floating: boolean): void {
+    const reason = screenSaverAppModel.setCardFloating(this.card.id, floating);
+    if (reason.length > 0) {
+      this.toast(reason);
+    }
+  }
+
   build() {
     Column() {
       // ---------- 顶栏（标题 + 完成） ----------
       ScreenSaverSheetHeader({
-        title: '时钟卡片',
+        title: this.panelTitle(),
         onDone: (): void => {
           this.onDone();
         }
@@ -137,8 +165,8 @@ export struct ScreenSaverClockSettingsPanel {
           .clip(true)
 
           // ---------- 格式选择 ----------
-          // chipEnabled：最小尺寸时除「纯时间」外的胶囊置灰不可点；
-          // 下方再补一行小字说明原因。
+          // 小尺寸下不拦截点击：尺寸矩阵决定实际渲染密度，
+          // 选择本身照常保存，卡片放大后自动生效（下方小字说明当前状态）。
           Column({ space: 6 }) {
             Text('格式')
               .fontSize(13)
@@ -149,7 +177,6 @@ export struct ScreenSaverClockSettingsPanel {
                 ScreenSaverChip({
                   label: option.label,
                   selected: this.card.clock.format === option.value,
-                  chipEnabled: !this.isMinimal() || option.value === 'timeOnly',
                   onTap: (): void => {
                     this.setFormat(option.value);
                   }
@@ -157,8 +184,10 @@ export struct ScreenSaverClockSettingsPanel {
               }, (option: ClockFormatOption): string => option.value)
             }
             .width('100%')
-            if (this.isMinimal()) {
-              Text('2×1 最小尺寸下仅支持纯时间 32fp')
+            if (this.density() !== 'full') {
+              Text(this.density() === 'minimal' ?
+                '当前尺寸为极简档：只显示时间，放大卡片后恢复完整格式' :
+                '当前尺寸为紧凑档：显示时间 + 一行日期，放大后显示农历')
                 .fontSize(11)
                 .fontColor(SCREEN_SAVER_COLORS.textTertiary)
                 .width('100%')
@@ -226,26 +255,37 @@ export struct ScreenSaverClockSettingsPanel {
           }
           .width('100%')
 
-          // ---------- 尺寸预设 ----------
-          // 预设列表来自卡片目录（CardCatalog），选中态比对当前跨格数。
-          Row() {
-            Text('尺寸')
-              .fontSize(14)
-              .fontColor('#CCCCCC')
-            Blank()
-            Row({ space: 8 }) {
-              ForEach(screenSaverFindCardMeta('clock')?.sizePresets ?? [], (preset: ScreensaverSizePreset) => {
-                ScreenSaverChip({
-                  label: preset.label,
-                  selected: this.card.colSpan === preset.colSpan && this.card.rowSpan === preset.rowSpan,
-                  onTap: (): void => {
-                    this.applySizePreset(preset);
-                  }
-                })
-              }, (preset: ScreensaverSizePreset): string => preset.label)
+          // ---------- 悬浮层（需求 B） ----------
+          // 悬浮后不占网格、始终在其他卡片之上；位置在编辑态拖动。
+          ScreenSaverToggleRow({
+            label: '悬浮层',
+            tip: '不占用网格，始终显示在其他卡片之上；位置在编辑态直接拖动',
+            isOn: this.card.floating,
+            onChange: (value: boolean): void => {
+              this.setFloating(value);
             }
+          })
+          if (this.card.floating) {
+            ScreenSaverToggleRow({
+              label: '锁定位置',
+              tip: '开启后编辑态拖动不会改变悬浮位置，避免误触',
+              isOn: this.card.floatLocked,
+              onChange: (value: boolean): void => {
+                screenSaverAppModel.setFloatLocked(this.card.id, value);
+              }
+            })
           }
-          .width('100%')
+
+          // ---------- 尺寸预设 ----------
+          // 预设列表来自尺寸矩阵（CardCatalog），选中态比对当前跨格数。
+          ScreenSaverSizePresetRow({
+            presets: screenSaverSizePresets('clock'),
+            currentCols: this.card.colSpan,
+            currentRows: this.card.rowSpan,
+            onPick: (preset: ScreensaverSizePreset): void => {
+              this.applySizePreset(preset);
+            }
+          })
 
           // ---------- 删除卡片 ----------
           ScreenSaverDeleteCardRow({

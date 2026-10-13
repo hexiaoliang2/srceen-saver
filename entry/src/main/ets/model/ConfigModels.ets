@@ -25,8 +25,11 @@
  */
 
 // ---------- 类型别名（字符串枚举，限定取值范围） ----------
-/** 四种卡片类型：时钟 / 相册 / 视频 / Git。 */
-export type ScreensaverCardType = 'clock' | 'photo' | 'video' | 'git';
+/**
+ * 卡片类型：时钟 / 相册 / 视频 / Git / 天气 / 应用入口。
+ * weather 与 entry 是需求 A 落地的两种卡片（自建 UI + 合法数据源/官方跳转能力）。
+ */
+export type ScreensaverCardType = 'clock' | 'photo' | 'video' | 'git' | 'weather' | 'entry';
 /** 卡片所处模式：编辑模式（可拖拽） / 播放模式（展示）。 */
 export type ScreensaverCardMode = 'edit' | 'play';
 /** 时钟卡片格式：时间+日期 / 仅时间 / 仅日期 / 农历。 */
@@ -36,11 +39,11 @@ export type PhotoOrder = 'shuffle' | 'time';
 /** Git 数据加载状态：未加载 / 加载中 / 成功 / 离线 / 失败。 */
 export type GitLoadState = 'idle' | 'loading' | 'success' | 'offline' | 'error';
 /** 半模态面板种类：当前弹出的是哪个设置面板。 */
-export type SheetKind = 'none' | 'clock' | 'photo' | 'video' | 'git' | 'albumSource';
+export type SheetKind = 'none' | 'clock' | 'photo' | 'video' | 'git' | 'weather' | 'entry' | 'albumSource';
 
 // ---------- 网格与断点常量 ----------
 /** 持久化数据的版本号：读盘时发现版本不符可做迁移或重置。 */
-export const SCREEN_SAVER_SCHEMA_VERSION: number = 2;
+export const SCREEN_SAVER_SCHEMA_VERSION: number = 3;
 // 手机档网格：4 列 × 8 行
 export const SCREEN_SAVER_GRID_COLS: number = 4;
 export const SCREEN_SAVER_GRID_ROWS: number = 8;
@@ -95,7 +98,7 @@ export interface ScreensaverStringOption {
 /**
  * 卡片类型的「说明书」：每种卡片的能力描述。
  * unique=true 表示同类型全局只能加一张（时钟、Git）；
- * 尺寸预设（sizePresets）供编辑面板的「尺寸」快捷按钮使用。
+ * sizeSpec 是这张卡片的「尺寸矩阵」（允许哪些跨度 + 每个跨度下内容怎么排）。
  */
 export interface ScreensaverCardMeta {
   cardType: ScreensaverCardType;
@@ -104,11 +107,39 @@ export interface ScreensaverCardMeta {
   unique: boolean;
   defaultColSpan: number;
   defaultRowSpan: number;
+  sizeSpec: ScreensaverCardSizeSpec;
+}
+
+/**
+ * 内容密度：同一张卡片在不同尺寸下显示多少信息。
+ * minimal（极简）→ compact（紧凑）→ full（完整），三档由尺寸矩阵查表决定，
+ * 卡片视图只按档位渲染，不再各自写 if-else 判断尺寸。
+ */
+export type ScreensaverCardDensity = 'minimal' | 'compact' | 'full';
+
+/**
+ * 尺寸矩阵里的一行：一个「列×行」跨度 + 该跨度下的内容密度。
+ * colSpan/rowSpan 同时为 0 表示「兜底行」：区间内其余任意矩形都合法，
+ * 且密度取这一行（只允许放在表末）。
+ * presetLabel 非空 → 这一行会作为设置面板的「尺寸」快捷胶囊显示。
+ */
+export interface ScreensaverCardSizeEntry {
+  colSpan: number;
+  rowSpan: number;
+  density: ScreensaverCardDensity;
+  presetLabel: string;
+}
+
+/**
+ * 一张卡片的尺寸规格：允许范围 + 尺寸矩阵表。
+ * min/max 由矩阵推导（不允许出现「表里没有、范围里却有」的尺寸）。
+ */
+export interface ScreensaverCardSizeSpec {
   minColSpan: number;
   minRowSpan: number;
   maxColSpan: number;
   maxRowSpan: number;
-  sizePresets: ScreensaverSizePreset[];
+  entries: ScreensaverCardSizeEntry[];
 }
 
 /** 尺寸预设：几列几行 + 显示名。 */
@@ -188,6 +219,36 @@ export class ScreensaverVideoConfig {
   @Trace muted: boolean = true;
 }
 
+/**
+ * 天气卡片配置（需求 A）。
+ *
+ * 数据源：Open-Meteo（免密钥公开 API，需署名；免费层限非商业用途 —— 详见 docs/card-feasibility.md）。
+ * enabled 默认 **false**：只有用户显式打开后才会发起网络请求，避免默认联网。
+ * 城市名由用户手输（不申请定位权限）。
+ */
+@ObservedV2
+export class ScreensaverWeatherConfig {
+  @Trace city: string = '';
+  @Trace latitude: number = 0;
+  @Trace longitude: number = 0;
+  @Trace enabled: boolean = false;
+  @Trace offlineCache: boolean = true;
+  @Trace unitCelsius: boolean = true;
+}
+
+/**
+ * 应用入口卡片配置（需求 A）。
+ *
+ * 只做「跳转」，不展示第三方内容、不内置任何第三方名称与链接与图标：
+ * 名称与链接都由用户填写，代码与仓库里不预置商标/URL。
+ */
+@ObservedV2
+export class ScreensaverEntryConfig {
+  @Trace displayName: string = '';
+  @Trace link: string = '';
+  @Trace subtitle: string = '';
+}
+
 /** Git 卡片配置。offlineCache：没网时是否显示上次缓存的数据。 */
 @ObservedV2
 export class ScreensaverGitConfig {
@@ -202,6 +263,11 @@ export class ScreensaverGitConfig {
  * 卡片实例：一张摆在网格里的卡片。
  * 每种类型的配置（clock/photo/video/git）都挂在实例上——
  * 即使当前类型用不到，也保留空配置，切换类型时设置不丢。
+ *
+ * 浮层字段（需求 B）：floating=true 表示这张卡不占网格单元、始终渲染在
+ * 其他卡片之上，位置用 floatX/floatY（vp，画布左上为原点）表示。
+ * 网格坐标 colStart/rowStart 仍然保留最新值：退出悬浮或回滚到旧版本时，
+ * 卡片还能落回一个合理的位置。
  */
 @ObservedV2
 export class ScreensaverCardInstance {
@@ -212,10 +278,16 @@ export class ScreensaverCardInstance {
   @Trace rowStart: number = 0;
   @Trace colSpan: number = 2;
   @Trace rowSpan: number = 2;
+  @Trace floating: boolean = false;      // 是否悬浮层（不占网格、层级最高）
+  @Trace floatX: number = 0;             // 悬浮位置 X（vp，相对画布左上）
+  @Trace floatY: number = 0;             // 悬浮位置 Y（vp）
+  @Trace floatLocked: boolean = false;   // 锁定位置（防误拖）
   @Trace clock: ScreensaverClockConfig = new ScreensaverClockConfig();
   @Trace photo: ScreensaverPhotoConfig = new ScreensaverPhotoConfig();
   @Trace video: ScreensaverVideoConfig = new ScreensaverVideoConfig();
   @Trace git: ScreensaverGitConfig = new ScreensaverGitConfig();
+  @Trace weather: ScreensaverWeatherConfig = new ScreensaverWeatherConfig();
+  @Trace entry: ScreensaverEntryConfig = new ScreensaverEntryConfig();
 }
 
 /** 全局设置（不隶属任何一张卡片）。 */
@@ -284,6 +356,43 @@ export interface ScreensaverRawGit {
   offlineCache?: boolean;
 }
 
+/** 天气配置的原始结构（需求 A）。 */
+export interface ScreensaverRawWeather {
+  city?: string;
+  latitude?: number;
+  longitude?: number;
+  enabled?: boolean;
+  offlineCache?: boolean;
+  unitCelsius?: boolean;
+}
+
+/** 应用入口配置的原始结构（需求 A）。 */
+export interface ScreensaverRawEntry {
+  displayName?: string;
+  link?: string;
+  subtitle?: string;
+}
+
+/** 天气数据（内存/缓存用）。 */
+export interface ScreensaverWeatherData {
+  city: string;
+  tempC: number;
+  description: string;
+  highC: number;
+  lowC: number;
+  fetchedAt: number;
+}
+
+/** 天气离线缓存的原始结构。 */
+export interface ScreensaverRawWeatherCache {
+  city?: string;
+  tempC?: number;
+  description?: string;
+  highC?: number;
+  lowC?: number;
+  fetchedAt?: number;
+}
+
 /** 单张卡片的原始结构。 */
 export interface ScreensaverRawCard {
   id?: string;
@@ -293,10 +402,16 @@ export interface ScreensaverRawCard {
   rowStart?: number;
   colSpan?: number;
   rowSpan?: number;
+  floating?: boolean;
+  floatX?: number;
+  floatY?: number;
+  floatLocked?: boolean;
   clock?: ScreensaverRawClock;
   photo?: ScreensaverRawPhoto;
   video?: ScreensaverRawVideo;
   git?: ScreensaverRawGit;
+  weather?: ScreensaverRawWeather;
+  entry?: ScreensaverRawEntry;
 }
 
 /** 全局设置的原始结构（含旧版的调光/环境色等遗留字段）。 */

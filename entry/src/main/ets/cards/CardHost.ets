@@ -25,6 +25,8 @@ import { ScreensaverClockCard } from './ClockCardView';
 import { ScreensaverPhotoCard } from './PhotoCardView';
 import { ScreensaverVideoCard } from './VideoCardView';
 import { ScreensaverGitCard } from './GitCardView';
+import { ScreensaverWeatherCard } from './WeatherCardView';
+import { ScreensaverEntryCard } from './EntryCardView';
 import { ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
 
 @ComponentV2
@@ -36,6 +38,8 @@ export struct ScreensaverCardHost {
 
   build() {
     // 按类型分发到具体卡片视图；所有参数原样透传。
+    // 内容密度不在这里透传：各卡片视图自己按 card.colSpan/rowSpan 查尺寸矩阵，
+    // 避免 @Builder 多参数按值传递在 ForEach 复用时「传了但不刷新」的坑。
     if (this.card.cardType === 'photo') {
       ScreensaverPhotoCard({
         card: this.card,
@@ -59,6 +63,20 @@ export struct ScreensaverCardHost {
         onRequestConfig: (): void => {
           this.onRequestConfig();
         }
+      })
+    } else if (this.card.cardType === 'weather') {
+      ScreensaverWeatherCard({
+        card: this.card,
+        cardMode: this.cardMode,
+        cardActive: this.cardActive,
+        onRequestConfig: (): void => {
+          this.onRequestConfig();
+        }
+      })
+    } else if (this.card.cardType === 'entry') {
+      ScreensaverEntryCard({
+        card: this.card,
+        cardMode: this.cardMode
       })
     } else {
       // 默认（含 'clock'）：时钟卡片不需要 active/onRequestConfig 参数

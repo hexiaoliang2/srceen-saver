@@ -27,14 +27,20 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
+  ScreenSaverSizePresetRow,
   ScreenSaverToggleRow
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
 import { screenSaverGitViewModel } from '../../model/GitViewModel';
+import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import { ScreensaverGitCard } from '../../cards/GitCardView';
-import { SCREEN_SAVER_GIT_WEEK_OPTIONS, ScreensaverCardInstance } from '../../model/ConfigModels';
+import {
+  SCREEN_SAVER_GIT_WEEK_OPTIONS,
+  ScreensaverCardInstance,
+  ScreensaverSizePreset
+} from '../../model/ConfigModels';
 
 interface PaletteOption {
   value: string;
@@ -115,12 +121,28 @@ export struct ScreenSaverGitSettingsPanel {
     }
   }
 
+  /** 面板标题：带实例标识（如「Git 贡献 · 设置」），便于核对面板归属哪张卡片。 */
+  private panelTitle(): string {
+    return `${screenSaverAppModel.cardInstanceTitle(this.card)} · 设置`;
+  }
+
+  /**
+   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardTo：吸附 + 碰撞校验）。
+   * Git 卡小于 2×2 时矩阵会降级为「数字摘要」而不是热力图。
+   */
+  private applySizePreset(preset: ScreensaverSizePreset): void {
+    const resized = screenSaverAppModel.resizeCardTo(this.card.id, preset.colSpan, preset.rowSpan);
+    if (!resized) {
+      this.toast('该尺寸不可用（与其它卡片重叠或越界）');
+    }
+  }
+
   build() {
     Column() {
       // ---------- 顶栏 ----------
       // 点「完成」先把用户名草稿落盘再关面板，避免丢输入。
       ScreenSaverSheetHeader({
-        title: 'Git 卡片',
+        title: this.panelTitle(),
         onDone: (): void => {
           this.applyUsername();
           this.onDone();
@@ -264,6 +286,17 @@ export struct ScreenSaverGitSettingsPanel {
             }
           }
           .width('100%')
+
+          // ---------- 尺寸 ----------
+          // 预设来自尺寸矩阵；小尺寸会把热力图降级为「总提交数 + 近 7 天迷你条」。
+          ScreenSaverSizePresetRow({
+            presets: screenSaverSizePresets('git'),
+            currentCols: this.card.colSpan,
+            currentRows: this.card.rowSpan,
+            onPick: (preset: ScreensaverSizePreset): void => {
+              this.applySizePreset(preset);
+            }
+          })
 
           // ---------- 断网缓存 ----------
           ScreenSaverToggleRow({

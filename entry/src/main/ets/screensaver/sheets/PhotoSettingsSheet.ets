@@ -9,7 +9,7 @@
  *   1. 照片来源：三种方式——
  *      a. 从图库选择照片（系统 picker，无需任何权限）；
  *      b. 浏览系统相册（需要相册读取权限，可选「全部照片/收藏/用户相册」）；
- *      c. 内置示例图片（6 张 raw 资源，释放到应用沙箱后当作本地照片用）。
+ *      c. 内置示例图片（7 张 raw 资源，释放到应用沙箱后当作本地照片用）。
  *   2. 播放行为：自动轮播（间隔下限 15s）、切换间隔、播放顺序（随机/时间序）、
  *      信息显示（拍摄日期/文件名）、预取下一张、删除卡片。
  *
@@ -36,16 +36,19 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
+  ScreenSaverSizePresetRow,
   ScreenSaverToggleRow
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
+import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import { ScreensaverPhotoCard } from '../../cards/PhotoCardView';
 import {
   SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS,
   ScreensaverCardInstance,
-  ScreensaverNumberOption
+  ScreensaverNumberOption,
+  ScreensaverSizePreset
 } from '../../model/ConfigModels';
 import {
   screenSaverMediaAccess,
@@ -62,7 +65,10 @@ const SAMPLE_PHOTO_NAMES: string[] = [
   'photo_square.jpg',
   'photo_lowres.jpg',
   'photo_dark.jpg',
-  'photo_wide.jpg'
+  'photo_wide.jpg',
+  // 变更项 4 的回归素材：926×1000（比例 0.926）与 2×2 卡片比例一致，
+  // 用来验证「内容比例 = 卡片比例 → 完全显示且无黑边」这条规则。
+  'photo_grid_ratio.jpg'
 ];
 /** 示例图片释放到沙箱时的目录名。 */
 const SAMPLE_PHOTO_DIR: string = 'sample_photos';
@@ -322,6 +328,22 @@ export struct ScreenSaverPhotoSettingsPanel {
     return out;
   }
 
+  /** 面板标题：带实例标识（如「相册 1 · 设置」），便于核对面板归属哪张卡片。 */
+  private panelTitle(): string {
+    return `${screenSaverAppModel.cardInstanceTitle(this.card)} · 设置`;
+  }
+
+  /**
+   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardTo：吸附 + 碰撞校验）。
+   * 失败说明目标尺寸与其它卡片重叠或超出网格，toast 提示用户。
+   */
+  private applySizePreset(preset: ScreensaverSizePreset): void {
+    const resized = screenSaverAppModel.resizeCardTo(this.card.id, preset.colSpan, preset.rowSpan);
+    if (!resized) {
+      this.toast('该尺寸不可用（与其它卡片重叠或越界）');
+    }
+  }
+
   /**
    * ================= 相册选择子面板 =================
    * 「全部照片」+ 系统相册列表 + 「新建相册…」（引导去系统图库）。
@@ -471,7 +493,7 @@ export struct ScreenSaverPhotoSettingsPanel {
   mainPanel() {
     Column() {
       ScreenSaverSheetHeader({
-        title: '相册卡片',
+        title: this.panelTitle(),
         onDone: (): void => {
           this.onDone();
         }
@@ -524,7 +546,7 @@ export struct ScreenSaverPhotoSettingsPanel {
               }
             })
             ScreenSaverChip({
-              label: '示例图片（6 张）',
+              label: '示例图片（7 张）',
               onTap: (): void => {
                 void this.useSamplePhotos();
               }
@@ -609,6 +631,18 @@ export struct ScreenSaverPhotoSettingsPanel {
             }
           }
           .width('100%')
+
+          // ---------- 尺寸 ----------
+          // 预设来自尺寸矩阵；相册卡任意 1..4 × 1..6 都合法（含 1×1、1×3），
+          // 这里只放几个常用档位，任意的奇数跨度仍可在编辑态拖拽缩放到。
+          ScreenSaverSizePresetRow({
+            presets: screenSaverSizePresets('photo'),
+            currentCols: this.card.colSpan,
+            currentRows: this.card.rowSpan,
+            onPick: (preset: ScreensaverSizePreset): void => {
+              this.applySizePreset(preset);
+            }
+          })
 
           // ---------- 信息显示 ----------
           // 显示拍摄日期（无则回退文件名）。

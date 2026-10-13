@@ -21,6 +21,8 @@ export interface ScreenSaverColors {
   bg: string;            // 页面最底层背景（近黑）
   bgElevated: string;    // 比页面高一级的背景（如列表项、小方块）
   cardBg: string;        // 卡片内部背景
+  cardSurface: string;   // 屏保画布上卡片的统一卡面（缺陷 2：所有卡片同色，边界一致）
+  cardHairline: string;  // 卡面细描边（缺陷 2：靠 1vp 描边区分边界，而不是靠色差）
   textPrimary: string;   // 主文字（接近白）
   textSecondary: string; // 次要文字（中灰）
   textTertiary: string;  // 辅助文字（更深一档的灰，用于 tip）
@@ -52,6 +54,12 @@ export const SCREEN_SAVER_COLORS: ScreenSaverColors = {
   bg: '#0E0E10',
   bgElevated: '#1A1A1E',
   cardBg: '#141418',
+  // 缺陷 2（静态对比）：所有卡片统一卡面 + 1vp 细描边。
+  // 画布保持纯黑 #000000（OLED 省电），卡面只比它亮一点点（ΔL*≈3），
+  // 边界主要靠 12% 白的细描边区分，避免大块灰色面板的「突兀感」。
+  // 数值来源：自定，待核实（工程内无 Pixso 第 11 页导出可引用）。
+  cardSurface: '#0D0D10',
+  cardHairline: '#1FFFFFFF',
   textPrimary: '#F2F2F2',
   textSecondary: '#A8A8AE',
   textTertiary: '#8A8A90',

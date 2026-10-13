@@ -27,6 +27,20 @@ import { fileIo } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from './Logger';
 
+/**
+ * URI → 文件路径 归一化。
+ *
+ * 卡片上存的是「URI」（Video 组件要求 URI 形式，沙箱文件也要带 file:// 前缀），
+ * 而 fileIo 打开文件用的是路径；对 file:///data/... 这种沙箱 URI 需要把前缀去掉。
+ * 媒体库 URI（file://media/...）保持原样——它本身就是 fileIo 认识的形式。
+ */
+function screenSaverToFilePath(uri: string): string {
+  if (uri.startsWith('file:///')) {
+    return uri.substring(7);
+  }
+  return uri;
+}
+
 class ScreenSaverVideoThumbService {
   /** 缓存目录是否已确保创建（只创建一次，避免每次都试 mkdir）。 */
   private coverDirReady: boolean = false;
@@ -81,7 +95,7 @@ class ScreenSaverVideoThumbService {
     let generator: media.AVImageGenerator | undefined = undefined;
     let pixelMap: image.PixelMap | undefined = undefined;
     try {
-      file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      file = fileIo.openSync(screenSaverToFilePath(uri), fileIo.OpenMode.READ_ONLY);
       generator = await media.createAVImageGenerator();
       // AVFileDescriptor：用文件描述符告诉生成器去哪读视频。
       const fdSrc: media.AVFileDescriptor = { fd: file.fd };
@@ -147,7 +161,7 @@ class ScreenSaverVideoThumbService {
     }
     let file: fileIo.File | undefined = undefined;
     try {
-      file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      file = fileIo.openSync(screenSaverToFilePath(uri), fileIo.OpenMode.READ_ONLY);
       return true;
     } catch (err) {
       return false;

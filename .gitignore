@@ -11,3 +11,5 @@
 **/.test
 /.appanalyzer
 .codegenie/
+/.verify
+/.deveco

@@ -10,12 +10,16 @@
  *
  * 【内存与性能设计（本文件的重点，面试常问）】
  * 屏保要长时间运行，相册卡片是内存压力最大的组件，所以有三条铁律：
- *   1. 按需解码：只解码「卡片实际大小」的居中区域（decodeForRegion），
- *      不整图进内存；
+ *   1. 按需解码：只解码「照片在卡片里实际显示的那块像素」（decodeFitted），
+ *      不整图进内存；解码尺寸随卡片尺寸变化重算（尺寸变化后 300ms 防抖）；
  *   2. 限额驻留：同一时刻最多保留 3 张位图——正在显示的 currentPixel、
  *      预解码好的 incomingPixel（下一张）、正在退役的 retiringMap（淡出中）；
  *   3. 延迟释放：位图可能在淡入动画中还被 GPU 引用，立即 release 可能
  *      引发渲染异常，所以 releaseMapDeferred 延迟 100ms 再释放。
+ *
+ * 【变更项 4：等比完整显示（Contain）】
+ * 画面一律完整可见、不裁切（ImageFit.Contain）；内容与卡片比例不一致时露出
+ * 黑边（底色由 SCREEN_SAVER_LETTERBOX_COLOR 决定），判据函数在 common/ContentFit.ets。
  *
  * 【generation（代数）机制】
  * 异步解码随时可能被「换照片源/重新排版」打断。每次重置都 generation++，
@@ -35,14 +39,19 @@ import { screenSaverTicker } from '../common/Ticker';
 import { screenSaverNetProbe } from '../common/NetProbe';
 import { screenSaverMediaAccess, screenSaverPhotoAccessFlag } from '../common/MediaAccess';
 import { screenSaverMotionDuration, SCREEN_SAVER_MOTION_PHOTO_FADE_MS } from '../common/Motion';
+import { ScreenSaverFitBars } from '../common/ContentFit';
+import { screenSaverResolveDensity } from './CardCatalog';
 import {
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
   SCREEN_SAVER_PHOTO_RECENT_DEDUP,
+  ScreensaverCardDensity,
   ScreensaverCardInstance,
   ScreensaverCardMode
 } from '../model/ConfigModels';
 
 // 尺寸变化后防抖 300ms 才重新解码（编辑模式连续拖尺寸时不狂解码）。
+// 注意：这 300ms 内画面依旧可见——渲染层会把现有位图按新容器尺寸等比缩放，
+// 松手后才换成按新尺寸重解码的清晰版本，因此不会闪黑或跳变。
 const SCREEN_SAVER_REFIT_DEBOUNCE_MS: number = 300;
 // 位图延迟释放时间：给淡入动画留出引用窗口。
 const SCREEN_SAVER_DEFERRED_RELEASE_MS: number = 100;
@@ -50,6 +59,13 @@ const SCREEN_SAVER_DEFERRED_RELEASE_MS: number = 100;
 const SCREEN_SAVER_PLACEHOLDER_NEUTRAL: string = '#1A1A1E';
 // 占位底色按照片主色调暗的系数。
 const SCREEN_SAVER_PLACEHOLDER_DARKEN: number = 0.45;
+/**
+ * 黑边（letterbox/pillarbox）底色（变更项 4，实现侧方案，待确认）。
+ * 选纯黑的原因：① 与屏保画布同色，黑边看起来是「留白」而不是「彩色边框」；
+ * ② OLED 省电；③ 照片轮播时底色恒定，不会因为每张照片主色不同而闪烁。
+ * 明确不使用模糊填充（blur letterbox）：实时模糊属于常驻渲染开销，与省电约束冲突。
+ */
+const SCREEN_SAVER_LETTERBOX_COLOR: string = '#000000';
 
 @ComponentV2
 export struct ScreensaverPhotoCard {
@@ -60,6 +76,15 @@ export struct ScreensaverPhotoCard {
   /** 手动切图信号：父组件改这个数字（+1），编辑态预览就切下一张。 */
   @Param manualAdvanceSeed: number = 0;
 
+  /**
+   * 当前尺寸对应的内容密度档（尺寸矩阵查表得到）。
+   * 直接读 card 的跨度而不是父组件透传的 @Param：@Trace 字段变化会立即
+   * 触发本视图重算，不受 ForEach 复用/@Builder 按值传参的影响。
+   */
+  private density(): ScreensaverCardDensity {
+    return screenSaverResolveDensity(this.card.cardType, this.card.colSpan, this.card.rowSpan);
+  }
+
   // ---------- 渲染状态 ----------
   @Local currentPixel: image.PixelMap | undefined = undefined;  // 正在显示的照片
   @Local incomingPixel: image.PixelMap | undefined = undefined; // 淡入中的新照片（也兼作预解码缓存）
@@ -69,6 +94,11 @@ export struct ScreensaverPhotoCard {
   @Local infoText: string = '';              // 左下角信息（拍摄日期/文件名）
   @Local deniedVisible: boolean = false;     // 「无相册权限」占位
   @Local emptyVisible: boolean = false;      // 「还没有照片」占位
+  /**
+   * 当前照片的适配结论（变更项 4）：none 无黑边 / horizontal 上下黑边 / vertical 左右黑边。
+   * 由 screenSaverDecideFit（ContentFit.ets）算出来，用于日志与最终底色选择。
+   */
+  @Local contentBars: ScreenSaverFitBars = 'none';
 
   // ---------- 内部流水线状态（不需要触发 UI 刷新，普通字段即可） ----------
   private playList: string[] = [];      // 有效照片 uri 列表
@@ -124,8 +154,8 @@ export struct ScreensaverPhotoCard {
     this.restartTimer();
   }
 
-  /** 信息开关变了：重新计算左下角文字。 */
-  @Monitor('card.photo.showInfo')
+  /** 信息开关或密度档变了：重新计算左下角文字（极简档下不显示）。 */
+  @Monitor('card.photo.showInfo', 'card.colSpan', 'card.rowSpan')
   onInfoChanged(): void {
     this.updateInfoText();
   }
@@ -444,9 +474,10 @@ export struct ScreensaverPhotoCard {
   /**
    * 计算左下角信息文字：
    * 优先显示拍摄日期（uriDates 查表），没有日期回退显示文件名（截断 40 字）。
+   * 极简档（1×1 等小尺寸）按尺寸矩阵的规则不显示信息条。
    */
   private updateInfoText(): void {
-    if (!this.card.photo.showInfo || this.playList.length === 0) {
+    if (!this.card.photo.showInfo || this.playList.length === 0 || this.density() === 'minimal') {
       this.infoText = '';
       return;
     }
@@ -524,22 +555,35 @@ export struct ScreensaverPhotoCard {
   }
 
   /**
-   * 解码一张照片：坏图名单直接跳过；解码成功后顺便提取主色，
-   * 把占位底色调成「这张照片的颜色调暗」——
-   * 照片切换瞬间底色和照片融为一体，观感更柔和。
+   * 解码一张照片（变更项 4：等比完整显示，不裁切）。
+   *
+   * 判据链路（可回归）：
+   *   1. 容器像素 = 卡片实际像素（cardW/cardH → px），即「容器实际显示像素」；
+   *   2. decodeFitted 读原图宽高，用 screenSaverFittedSize 算出等比放进容器的解码尺寸
+   *      （绝不裁切、绝不放大、长边 ≤ 2160 防内存）；
+   *   3. screenSaverDecideFit 给出「是否该有黑边、在哪一侧」的结论，写入
+   *      contentBars 并打日志——黑边本身由渲染层 ImageFit.Contain + 底色产生。
+   * 解码成功后顺便提取主色，把「加载中」占位底色调成这张照片的颜色调暗。
    */
   private async decodeUri(uri: string): Promise<image.PixelMap | undefined> {
     if (this.excludedUris.indexOf(uri) >= 0) {
       return undefined;
     }
-    const map = await screenSaverImageLoader.decodeForRegion(uri, this.targetWidthPx(), this.targetHeightPx());
-    if (map !== undefined) {
-      const avg = await screenSaverImageLoader.extractMainColor(map);
-      if (avg !== undefined) {
-        this.placeholderColor = screenSaverDarkenHex(avg, SCREEN_SAVER_PLACEHOLDER_DARKEN);
-      }
+    const containerW = this.targetWidthPx();
+    const containerH = this.targetHeightPx();
+    const decoded = await screenSaverImageLoader.decodeFitted(uri, containerW, containerH);
+    if (decoded === undefined) {
+      return undefined;
     }
-    return map;
+    this.contentBars = decoded.decision.bars;
+    ScreenSaverLogger.info(`photo fit uri=${uri} card=${containerW}x${containerH}px content=` +
+      `${decoded.contentWidth}x${decoded.contentHeight}px ratio=${decoded.decision.contentRatio.toFixed(3)}/` +
+      `${decoded.decision.cardRatio.toFixed(3)} bars=${decoded.decision.bars}`);
+    const avg = await screenSaverImageLoader.extractMainColor(decoded.pixelMap);
+    if (avg !== undefined) {
+      this.placeholderColor = screenSaverDarkenHex(avg, SCREEN_SAVER_PLACEHOLDER_DARKEN);
+    }
+    return decoded.pixelMap;
   }
 
   /** 解码目标宽（px）：卡片实际宽，未测得时用 320vp 默认值。 */
@@ -643,37 +687,41 @@ export struct ScreensaverPhotoCard {
 
   /**
    * 界面结构（Stack 分层，从底到顶）：
-   *   1. 占位底色（照片主色调暗，切换瞬间不露黑）
-   *   2. 当前照片（Cover 裁剪填满）
-   *   3. 淡入中的新照片（opacity 由动画驱动）
+   *   1. 底色：还没出图时用照片主色调暗（加载瞬间不刺眼）；出图后固定用黑边色
+   *      ——此时它只会在内容与卡片比例不一致时露出来（letterbox/pillarbox）
+   *   2. 当前照片（**Contain：等比完整显示，不裁切**）
+   *   3. 淡入中的新照片（opacity 由动画驱动，同样 Contain）
    *   4. 「加载中…」/「还没有照片」/「无相册访问权限」占位文字
    *   5. 左下角信息条（拍摄日期/文件名）
+   *
+   * 关于「黑边由谁产生」：内容与卡片比例一致时 Contain 正好铺满（无黑边）；
+   * 不一致时 Contain 会等比缩小到完整可见，多出来的部分露出底色（黑边）。
    */
   build() {
     Stack() {
       Column()
         .width('100%')
         .height('100%')
-        .backgroundColor(this.placeholderColor)
+        .backgroundColor(this.currentPixel === undefined ? this.placeholderColor : SCREEN_SAVER_LETTERBOX_COLOR)
       if (this.currentPixel !== undefined) {
         Image(this.currentPixel)
           .width('100%')
           .height('100%')
-          .objectFit(ImageFit.Cover)
+          .objectFit(ImageFit.Contain)
       }
       if (this.incomingPixel !== undefined) {
         Image(this.incomingPixel)
           .width('100%')
           .height('100%')
-          .objectFit(ImageFit.Cover)
+          .objectFit(ImageFit.Contain)
           .opacity(this.fadeOpacity)
       }
-      if (this.placeholderVisible && !this.deniedVisible && !this.emptyVisible) {
+      if (this.placeholderVisible && !this.deniedVisible && !this.emptyVisible && this.density() !== 'minimal') {
         Text('加载中…')
           .fontSize(12)
           .fontColor('#8C8C8C')
       }
-      if (this.emptyVisible) {
+      if (this.emptyVisible && this.density() !== 'minimal') {
         Column({ space: 4 }) {
           Text('还没有照片')
             .fontSize(13)
@@ -683,7 +731,7 @@ export struct ScreensaverPhotoCard {
             .fontColor('#6E6E73')
         }
       }
-      if (this.deniedVisible) {
+      if (this.deniedVisible && this.density() !== 'minimal') {
         Column({ space: 6 }) {
           Text('无相册访问权限')
             .fontSize(13)
@@ -709,14 +757,14 @@ export struct ScreensaverPhotoCard {
       if (this.infoText.length > 0) {
         Row() {
           Text(this.infoText)
-            .fontSize(10)
+            .fontSize(this.density() === 'compact' ? 9 : 10)
             .fontColor('#D0D0D0')
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         .width('100%')
-        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-        .backgroundColor('#66000000')
+        .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+        .backgroundColor('#73000000')
         .align(Alignment.BottomStart)
       }
     }

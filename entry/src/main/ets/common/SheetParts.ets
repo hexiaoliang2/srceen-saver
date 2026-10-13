@@ -17,6 +17,7 @@
  */
 
 import { SCREEN_SAVER_COLORS } from './ScreenSaverStyle';
+import { ScreensaverSizePreset } from '../model/ConfigModels';
 
 /**
  * 面板顶栏：左边标题、右边「完成」。
@@ -81,6 +82,40 @@ export struct ScreenSaverChip {
         this.onTap();
       }
     })
+  }
+}
+
+/**
+ * 「尺寸」行：把该卡片尺寸矩阵里的快捷尺寸做成胶囊。
+ * 预设列表由 CardCatalog.screenSaverSizePresets 从尺寸矩阵里筛出来，
+ * 面板不自己维护一份尺寸清单（避免和矩阵不一致）。
+ */
+@ComponentV2
+export struct ScreenSaverSizePresetRow {
+  @Param presets: ScreensaverSizePreset[] = [];
+  @Param currentCols: number = 0;
+  @Param currentRows: number = 0;
+  @Event onPick: (preset: ScreensaverSizePreset) => void = (preset: ScreensaverSizePreset): void => {};
+
+  build() {
+    Row() {
+      Text('尺寸')
+        .fontSize(14)
+        .fontColor('#CCCCCC')
+      Blank()
+      Row({ space: 8 }) {
+        ForEach(this.presets, (preset: ScreensaverSizePreset) => {
+          ScreenSaverChip({
+            label: preset.label,
+            selected: this.currentCols === preset.colSpan && this.currentRows === preset.rowSpan,
+            onTap: (): void => {
+              this.onPick(preset);
+            }
+          })
+        }, (preset: ScreensaverSizePreset): string => `size_${preset.label}`)
+      }
+    }
+    .width('100%')
   }
 }
 
