@@ -1,3 +1,34 @@
+/**
+ * =============================================================================
+ * 应用数据模型（AppModel.ets）
+ * =============================================================================
+ *
+ * 【这个文件是干什么的】
+ * 整个屏保应用的「大脑」：布局数据（卡片列表、全局设置）的唯一持有者，
+ * 负责三件事：
+ *   1. 持久化：把布局存进系统偏好（Preferences）、启动时加载回来；
+ *   2. 布局计算：卡片能不能放在某个格子（碰撞检测）、找空位、跨设备重排；
+ *   3. 增删改查：添加/删除/移动/缩放/停用卡片，修改各卡片配置。
+ *
+ * 【为什么所有界面都改这里，而不是各改各的数据】
+ * 单一数据源（Single Source of Truth）：界面只负责展示和收集用户操作，
+ * 所有数据变动都走 AppModel 的方法。好处：
+ *   - 每次变动自动 save()，不会出现「改了 A 页忘了存」的 bug；
+ *   - 任何页面读到的都是同一份 layout，不会各持一份导致不同步。
+ *
+ * 【数据流（新手必读）】
+ *   磁盘 JSON --(load: 宽松 Raw + 校验)--> 严格类 layout（@ObservedV2）
+ *   界面改数据 --(save: 防抖 200ms)--> JSON 写回磁盘
+ * Raw 结构字段全可选、来者不拒；严格类字段必有值。两者间的转换代码
+ * 都集中在本文件（applyRawXxx / toRawXxx 系列）。
+ *
+ * 【防抖（Debounce）是什么】
+ * 用户连续拖动卡片时会触发十几次 save()。如果每次都同步写磁盘，
+ * 会卡顿。做法：save() 只重置一个 200ms 的定时器，期间再来 save() 就再重置，
+ * 直到用户停下来 200ms 才真正写一次盘。
+ * =============================================================================
+ */
+
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
@@ -31,19 +62,23 @@ import {
   ScreensaverSettings
 } from './ConfigModels';
 
-const SCREEN_SAVER_STORE_NAME: string = 'screen_saver_store';
-const SCREEN_SAVER_LAYOUT_KEY: string = 'screen_saver_layout_v2';
-const SCREEN_SAVER_LEGACY_KEY: string = 'screen_saver_config';
-const SCREEN_SAVER_GUIDE_KEY: string = 'screen_saver_guide_done';
-const SCREEN_SAVER_GIT_TOKEN_KEY: string = 'screen_saver_git_token';
-const SCREEN_SAVER_GIT_CACHE_KEY: string = 'screen_saver_git_cache';
+// ---------- 持久化键名（Preferences 里的 key） ----------
+const SCREEN_SAVER_STORE_NAME: string = 'screen_saver_store';       // 偏好数据库文件名
+const SCREEN_SAVER_LAYOUT_KEY: string = 'screen_saver_layout_v2';   // 当前版本的布局数据
+const SCREEN_SAVER_LEGACY_KEY: string = 'screen_saver_config';      // 旧版本的键（迁移用）
+const SCREEN_SAVER_GUIDE_KEY: string = 'screen_saver_guide_done';   // 引导页是否已完成
+const SCREEN_SAVER_GIT_TOKEN_KEY: string = 'screen_saver_git_token';// GitHub 访问令牌
+const SCREEN_SAVER_GIT_CACHE_KEY: string = 'screen_saver_git_cache';// Git 数据离线缓存
+// 保存防抖间隔：停下来 200ms 才真正写盘。
 const SCREEN_SAVER_SAVE_DEBOUNCE_MS: number = 200;
 
+/** 生成卡片唯一 id：前缀 + 时间戳(36进制) + 随机数，基本不可能重复。 */
 function screenSaverGenerateId(prefix: string): string {
   const randomPart: number = Math.floor(Math.random() * 1000000);
   return `${prefix}_${Date.now().toString(36)}_${randomPart.toString(36)}`;
 }
 
+/** 数值夹取：把 value 四舍五入后限制在 [min, max]。读盘数据的「消毒」函数。 */
 function screenSaverClampInt(value: number, min: number, max: number): number {
   const rounded: number = Math.round(value);
   if (rounded < min) {
@@ -56,16 +91,26 @@ function screenSaverClampInt(value: number, min: number, max: number): number {
 }
 
 export class ScreensaverAppModel {
+  /** 布局根节点：全局设置 + 卡片数组。界面直接引用它来渲染（只读引用）。 */
   readonly layout: ScreensaverLayout = new ScreensaverLayout();
+  /** 应用上下文：EntryAbility 启动时注入，供打开 Preferences 用。 */
   private abilityContext: common.UIAbilityContext | undefined = undefined;
+  /** 偏好存储实例（懒加载，用 ensureStore 获取）。 */
   private store: preferences.Preferences | undefined = undefined;
+  /** 防抖保存的定时器句柄，-1 表示当前没有待执行的保存。 */
   private saveTimer: number = -1;
+  /** load() 是否已完成。 */
   private loaded: boolean = false;
+  /** 等待加载完成的回调队列（加载完成前注册的界面刷新等任务）。 */
   private loadedCallbacks: Array<() => void> = [];
+  /** 引导页是否已完成。 */
   private guideDone: boolean = false;
+  /** GitHub 访问令牌（私有 API 拉取贡献数据可能需要）。 */
   private gitToken: string = '';
+  /** Git 数据的内存缓存（离线显示用）。 */
   private gitCache: ScreensaverGitData | undefined = undefined;
 
+  /** 注入应用上下文（EntryAbility onCreate 时调用一次）。 */
   attachContext(context: common.UIAbilityContext): void {
     this.abilityContext = context;
   }
@@ -74,6 +119,10 @@ export class ScreensaverAppModel {
     return this.loaded;
   }
 
+  /**
+   * 「加载完成后执行」：已加载则立即执行回调；
+   * 否则先排队，load() 完成时统一触发。用于界面等数据就绪再渲染。
+   */
   whenLoaded(callback: () => void): void {
     if (this.loaded) {
       callback();
@@ -82,6 +131,7 @@ export class ScreensaverAppModel {
     this.loadedCallbacks.push(callback);
   }
 
+  /** 标记加载完成并触发所有排队的回调（只触发一次）。 */
   private notifyLoaded(): void {
     this.loaded = true;
     const callbacks = this.loadedCallbacks;
@@ -91,6 +141,12 @@ export class ScreensaverAppModel {
     }
   }
 
+  /**
+   * 启动时加载全部持久化数据：引导标记、Git 令牌、Git 缓存、布局。
+   * 布局读取优先级：v2 键 → 旧版键（迁移） → 都没有就生成默认布局。
+   * 任何失败都降级到默认布局并照常 notifyLoaded——
+   * 「宁可给默认界面，也不能卡在加载」。
+   */
   async load(): Promise<void> {
     const context = this.abilityContext;
     if (context === undefined) {
@@ -103,6 +159,7 @@ export class ScreensaverAppModel {
         this.ensureDefaultLayout();
         return;
       }
+      // 读出的值类型不可信（preferences.ValueType 是联合类型），逐一校验。
       const guideValue = await store.get(SCREEN_SAVER_GUIDE_KEY, false);
       this.guideDone = typeof guideValue === 'boolean' ? guideValue : false;
       const tokenValue = await store.get(SCREEN_SAVER_GIT_TOKEN_KEY, '');
@@ -115,6 +172,7 @@ export class ScreensaverAppModel {
       if (typeof layoutText === 'string' && layoutText.length > 0) {
         this.applyLayoutText(layoutText);
       } else {
+        // v2 键为空：尝试读旧版键，把老用户的数据迁移过来。
         const legacyText = await store.get(SCREEN_SAVER_LEGACY_KEY, '');
         if (typeof legacyText === 'string' && legacyText.length > 0) {
           this.applyLayoutText(legacyText);
@@ -132,6 +190,7 @@ export class ScreensaverAppModel {
     }
   }
 
+  /** 防抖保存：200ms 内的连续改动合并成一次写盘。 */
   save(): void {
     if (this.saveTimer >= 0) {
       clearTimeout(this.saveTimer);
@@ -142,6 +201,7 @@ export class ScreensaverAppModel {
     }, SCREEN_SAVER_SAVE_DEBOUNCE_MS);
   }
 
+  /** 立即写盘（跳过防抖）。退出屏保前调用，确保最后状态落盘。 */
   async flush(): Promise<void> {
     if (this.saveTimer >= 0) {
       clearTimeout(this.saveTimer);
@@ -154,6 +214,7 @@ export class ScreensaverAppModel {
     return this.guideDone;
   }
 
+  /** 标记引导页完成（幂等：重复调用不会重复写盘）。 */
   markGuideDone(): void {
     if (this.guideDone) {
       return;
@@ -170,6 +231,7 @@ export class ScreensaverAppModel {
     return this.gitToken.length > 0;
   }
 
+  /** 保存 GitHub 令牌（自动去首尾空格）。 */
   setGitToken(token: string): void {
     this.gitToken = token.trim();
     void this.persistFlag(SCREEN_SAVER_GIT_TOKEN_KEY, this.gitToken);
@@ -179,6 +241,7 @@ export class ScreensaverAppModel {
     return this.gitCache;
   }
 
+  /** 更新 Git 离线缓存（内存 + 磁盘两份）。 */
   setGitCache(data: ScreensaverGitData): void {
     this.gitCache = data;
     const raw: ScreensaverRawGitCache = {
@@ -189,6 +252,10 @@ export class ScreensaverAppModel {
     };
     void this.persistFlag(SCREEN_SAVER_GIT_CACHE_KEY, JSON.stringify(raw));
   }
+
+  // =====================================================================
+  // 卡片查询
+  // =====================================================================
 
   cardById(cardId: string): ScreensaverCardInstance | undefined {
     return this.layout.cards.find((card: ScreensaverCardInstance): boolean => card.id === cardId);
@@ -202,20 +269,31 @@ export class ScreensaverAppModel {
     return this.layout.cards.filter((card: ScreensaverCardInstance): boolean => card.cardType === cardType);
   }
 
+  /**
+   * 「添加卡片」的拦截原因（空串 = 可以添加）。
+   * 先于 addCard 调用，让卡片库界面给出精确提示（唯一卡片重复/空间不足），
+   * 而不是点了没反应。
+   */
   cardAddBlockedReason(cardType: ScreensaverCardType): string {
     const meta = screenSaverFindCardMeta(cardType);
     if (meta === undefined) {
       return '未知卡片类型';
     }
+    // unique 卡片（时钟/Git）全局只允许一张
     if (meta.unique && this.hasCardType(cardType)) {
       return `${meta.displayName}卡片最多添加一张`;
     }
+    // 默认尺寸放不下也拦截，提示用户先腾地方
     if (this.findFreeSlot(meta.defaultColSpan, meta.defaultRowSpan) === undefined) {
       return '空间不足：请先移出或缩小卡片';
     }
     return '';
   }
 
+  /**
+   * 添加卡片：先检查拦截原因 → 找空位 → 按默认尺寸建卡入列。
+   * 相册/视频卡片额外继承全局默认值（轮播间隔、自动播放）。
+   */
   addCard(cardType: ScreensaverCardType): boolean {
     if (this.cardAddBlockedReason(cardType).length > 0) {
       return false;
@@ -234,6 +312,7 @@ export class ScreensaverAppModel {
     return true;
   }
 
+  /** 启用/停用卡片。停用的卡播放时只显示占位框，不渲染内容（省电）。 */
   setCardEnabled(cardId: string, enabled: boolean): void {
     const card = this.cardById(cardId);
     if (card === undefined || card.enabled === enabled) {
@@ -243,10 +322,16 @@ export class ScreensaverAppModel {
     this.save();
   }
 
+  /**
+   * 把当前卡片列表序列化成 JSON 文本（编辑模式「全量快照」）。
+   * 进入编辑模式前拍一份，用户点「取消」时整体还原——
+   * 比逐项记录改动简单可靠得多。
+   */
   snapshotCards(): string {
     return JSON.stringify(this.toRawCards());
   }
 
+  /** 从快照还原卡片列表（编辑模式「取消」）。解析失败保持现状。 */
   restoreCardsFromSnapshot(text: string): void {
     if (text.length === 0) {
       return;
@@ -263,6 +348,7 @@ export class ScreensaverAppModel {
     this.save();
   }
 
+  /** 按 id 删除一张卡片。 */
   removeCard(cardId: string): void {
     const index = this.layout.cards.findIndex((card: ScreensaverCardInstance): boolean => card.id === cardId);
     if (index >= 0) {
@@ -271,6 +357,7 @@ export class ScreensaverAppModel {
     }
   }
 
+  /** 删除某类型的全部卡片（未使用，保留为批量操作能力）。 */
   removeCardsOfType(cardType: ScreensaverCardType): void {
     const kept: ScreensaverCardInstance[] = [];
     for (const card of this.layout.cards) {
@@ -284,6 +371,10 @@ export class ScreensaverAppModel {
     }
   }
 
+  /**
+   * 按行列增量移动卡片（编辑面板的方向按钮）。
+   * 位置会被夹取在网格范围内；placeCard 内部还会做碰撞检查。
+   */
   moveCard(cardId: string, deltaCol: number, deltaRow: number): boolean {
     const card = this.cardById(cardId);
     if (card === undefined) {
@@ -297,6 +388,10 @@ export class ScreensaverAppModel {
     return this.placeCard(cardId, nextCol, nextRow, card.colSpan, card.rowSpan);
   }
 
+  /**
+   * 缩放卡片到指定跨度：先按卡片类型的最小/最大值夹取，
+   * 再保证缩放后不越出网格右下边界（必要时起点左移/上移），最后尝试放置。
+   */
   resizeCardTo(cardId: string, colSpan: number, rowSpan: number): boolean {
     const card = this.cardById(cardId);
     if (card === undefined) {
@@ -312,11 +407,17 @@ export class ScreensaverAppModel {
     if (nextColSpan === card.colSpan && nextRowSpan === card.rowSpan) {
       return false;
     }
+    // 靠右/靠下的卡片放大后可能越界：把起点往回拉，保证不超出网格。
     const nextColStart = Math.min(card.colStart, SCREEN_SAVER_GRID_COLS - nextColSpan);
     const nextRowStart = Math.min(card.rowStart, SCREEN_SAVER_GRID_ROWS - nextRowSpan);
     return this.placeCard(cardId, nextColStart, nextRowStart, nextColSpan, nextRowSpan);
   }
 
+  /**
+   * 放置卡片（移动/缩放的最终出口）：
+   * 先用 canPlace 检查合法（不越界、不与其它卡重叠），通过才写入并保存。
+   * 所有改动入口都走这里，保证「不可能出现两张卡叠在一起」。
+   */
   placeCard(cardId: string, colStart: number, rowStart: number, colSpan: number, rowSpan: number): boolean {
     const card = this.cardById(cardId);
     if (card === undefined) {
@@ -334,6 +435,10 @@ export class ScreensaverAppModel {
     return true;
   }
 
+  /**
+   * 把卡片移到数组末尾（渲染最上层）。
+   * 卡片拖动/点按后调用，保证被操作的卡片盖在其它卡片上面。
+   */
   bringToFront(cardId: string): boolean {
     const index = this.layout.cards.findIndex((card: ScreensaverCardInstance): boolean => card.id === cardId);
     if (index < 0 || index === this.layout.cards.length - 1) {
@@ -346,6 +451,10 @@ export class ScreensaverAppModel {
     return true;
   }
 
+  /**
+   * 碰撞检测：目标区域是否越界、是否与其它卡片重叠。
+   * 矩形相交的判定是经典算法：两条边都「错开」才不相交。
+   */
   canPlace(cardId: string, colStart: number, rowStart: number, colSpan: number, rowSpan: number): boolean {
     if (colStart < 0 || rowStart < 0 || colSpan <= 0 || rowSpan <= 0) {
       return false;
@@ -355,7 +464,7 @@ export class ScreensaverAppModel {
     }
     for (const card of this.layout.cards) {
       if (card.id === cardId) {
-        continue;
+        continue; // 自己不算和自己撞
       }
       const overlaps = colStart < card.colStart + card.colSpan && colStart + colSpan > card.colStart &&
         rowStart < card.rowStart + card.rowSpan && rowStart + rowSpan > card.rowStart;
@@ -366,16 +475,29 @@ export class ScreensaverAppModel {
     return true;
   }
 
+  // =====================================================================
+  // 跨设备重排（reflow）
+  // =====================================================================
+
+  /**
+   * 设备形态变化（手机→折叠屏→平板）时，把按手机网格 (4×8) 保存的布局
+   * 「折算」到新网格（如 12×7），返回每张卡的新位置（顺序与 cards 一致）。
+   * 算法：按比例缩放每张卡的跨度 → 在新网格里从上到下找第一个放得下的
+   * 位置 → 放不下就逐级缩小跨度再试。纯计算不修改数据，由界面决定是否应用。
+   */
   reflowForColumns(columns: number, rows: number): ScreensaverGridPos[] {
     const result: ScreensaverGridPos[] = [];
+    // 用一维布尔数组表示新网格的占用情况（下标 = row * columns + col）。
     const occupied: boolean[] = [];
     const cellCount = columns * rows;
     for (let i = 0; i < cellCount; i++) {
       occupied.push(false);
     }
+    // 手机网格 → 新网格的缩放系数（如 4列→12列 时 colFactor=3）。
     const colFactor = columns / SCREEN_SAVER_GRID_COLS;
     const rowFactor = rows / SCREEN_SAVER_GRID_ROWS;
     for (const card of this.layout.cards) {
+      // 跨度按比例四舍五入，并夹在新网格范围内。
       let spanCols = Math.max(1, Math.min(columns, Math.round(card.colSpan * colFactor)));
       let spanRows = Math.max(1, Math.min(rows, Math.round(card.rowSpan * rowFactor)));
       let placed = false;
@@ -393,6 +515,7 @@ export class ScreensaverAppModel {
           placed = true;
           break;
         }
+        // 放不下：先试着减行数，再减列数（保持卡片尽量接近原比例）。
         if (spanRows > 1) {
           spanRows--;
           continue;
@@ -404,6 +527,7 @@ export class ScreensaverAppModel {
         break;
       }
       if (!placed) {
+        // 极端情况（网格比卡片还小）：堆到左上角，至少还能看见。
         const pos: ScreensaverGridPos = { colStart: 0, rowStart: 0, colSpan: spanCols, rowSpan: spanRows };
         result.push(pos);
       }
@@ -411,6 +535,7 @@ export class ScreensaverAppModel {
     return result;
   }
 
+  /** 在占用表中从上到下、从左到右找第一个能放下 colSpan×rowSpan 的空位。 */
   private findRegionInOccupied(occupied: boolean[], columns: number, rows: number, colSpan: number,
     rowSpan: number): ScreensaverGridSlot | undefined {
     for (let row = 0; row <= rows - rowSpan; row++) {
@@ -424,6 +549,7 @@ export class ScreensaverAppModel {
     return undefined;
   }
 
+  /** 检查占用表中某矩形区域是否全空。 */
   private regionFree(occupied: boolean[], columns: number, col: number, row: number, colSpan: number,
     rowSpan: number): boolean {
     for (let r = row; r < row + rowSpan; r++) {
@@ -436,6 +562,7 @@ export class ScreensaverAppModel {
     return true;
   }
 
+  /** 在占用表中把某矩形区域标记为占用/空闲。 */
   private markRegion(occupied: boolean[], columns: number, col: number, row: number, colSpan: number,
     rowSpan: number, value: boolean): void {
     for (let r = row; r < row + rowSpan; r++) {
@@ -445,6 +572,7 @@ export class ScreensaverAppModel {
     }
   }
 
+  /** 在手机网格 (4×8) 里找一个能放下 colSpan×rowSpan 的空位（添加卡片用）。 */
   private findFreeSlot(colSpan: number, rowSpan: number): ScreensaverGridSlot | undefined {
     for (let row = 0; row <= SCREEN_SAVER_GRID_ROWS - rowSpan; row++) {
       for (let col = 0; col <= SCREEN_SAVER_GRID_COLS - colSpan; col++) {
@@ -466,6 +594,10 @@ export class ScreensaverAppModel {
     return undefined;
   }
 
+  /**
+   * 新建卡片实例。相册卡继承全局默认轮播间隔；视频卡继承全局默认自动播放。
+   * 这样用户在设置里改过默认值后，新卡片能「开箱即符合预期」。
+   */
   private buildCard(cardType: ScreensaverCardType, colStart: number, rowStart: number, colSpan: number,
     rowSpan: number): ScreensaverCardInstance {
     const card = new ScreensaverCardInstance();
@@ -484,6 +616,7 @@ export class ScreensaverAppModel {
     return card;
   }
 
+  /** 生成默认布局（首次启动/数据损坏时）：时钟 + Git + 相册 三张卡铺满 8 行。 */
   ensureDefaultLayout(): void {
     this.layout.settings = new ScreensaverSettings();
     this.layout.cards = [];
@@ -497,6 +630,10 @@ export class ScreensaverAppModel {
     this.save();
   }
 
+  /**
+   * 时钟卡的业务规则：格子数不足 4 个（如 1×2）时强制纯时间格式——
+   * 空间太小塞不下日期行，显示会挤成一团。
+   */
   private applyClockSizeConstraint(card: ScreensaverCardInstance): void {
     if (card.cardType !== 'clock') {
       return;
@@ -506,6 +643,15 @@ export class ScreensaverAppModel {
     }
   }
 
+  // =====================================================================
+  // 磁盘 → 内存（Raw 校验转换）
+  // =====================================================================
+
+  /**
+   * 解析磁盘 JSON 文本并应用到内存模型。
+   * 解析失败 → 用默认布局兜底（数据再坏，应用也要能打开）。
+   * 兼容旧版「多页面」结构：没有 cards 但有 pages 时取第一页。
+   */
   private applyLayoutText(text: string): void {
     let raw: ScreensaverRawLayout | undefined = undefined;
     try {
@@ -530,11 +676,13 @@ export class ScreensaverAppModel {
       this.applyCards(raw.cards ?? []);
     }
     if (this.layout.cards.length === 0 && raw.schemaVersion !== undefined) {
+      // 用户可能真的删光了所有卡片：此时不要「贴心地」补默认布局。
       ScreenSaverLogger.info('empty layout from storage, no auto default');
     }
     this.layout.schemaVersion = SCREEN_SAVER_SCHEMA_VERSION;
   }
 
+  /** Raw 设置 → 严格设置。每个字段都 ?? 默认值，数字字段再夹取范围。 */
   private applySettings(rawSettings: ScreensaverRawSettings | undefined): void {
     const settings = this.layout.settings;
     if (rawSettings === undefined) {
@@ -551,6 +699,11 @@ export class ScreensaverAppModel {
     settings.lowBatteryAutoExit = rawSettings.lowBatteryAutoExit ?? true;
   }
 
+  /**
+   * Raw 卡片数组 → 严格卡片列表。逐张转换 + 逐张碰撞检查：
+   * 磁盘数据可能被外部改坏（两张卡同位置），重叠的直接丢弃，
+   * 保证进入内存的布局永远合法。
+   */
   private applyCards(rawCards: ScreensaverRawCard[]): void {
     const accepted: ScreensaverCardInstance[] = [];
     for (const rawCard of rawCards) {
@@ -567,6 +720,7 @@ export class ScreensaverAppModel {
     this.layout.cards = accepted;
   }
 
+  /** 检查候选卡是否越界或与已接受列表中的卡重叠。 */
   private canPlaceInList(cards: ScreensaverCardInstance[], candidate: ScreensaverCardInstance): boolean {
     if (candidate.colStart + candidate.colSpan > SCREEN_SAVER_GRID_COLS ||
       candidate.rowStart + candidate.rowSpan > SCREEN_SAVER_GRID_ROWS) {
@@ -584,6 +738,10 @@ export class ScreensaverAppModel {
     return true;
   }
 
+  /**
+   * 单张 Raw 卡片 → 严格卡片。所有数值都经过夹取、所有枚举都经过白名单
+   * 校验——磁盘数据不可信是本方法存在的原因。
+   */
   private buildCardFromRaw(rawCard: ScreensaverRawCard): ScreensaverCardInstance | undefined {
     const cardType = this.parseCardType(rawCard.cardType);
     if (cardType === undefined) {
@@ -607,6 +765,7 @@ export class ScreensaverAppModel {
     return card;
   }
 
+  /** 字符串 → 卡片类型（白名单校验，未知值返回 undefined 丢弃）。 */
   private parseCardType(value: string | undefined): ScreensaverCardType | undefined {
     if (value === 'clock') {
       return 'clock';
@@ -623,6 +782,11 @@ export class ScreensaverAppModel {
     return undefined;
   }
 
+  /**
+   * Raw 时钟配置 → 严格配置。
+   * 兼容旧版字段：showDate（布尔）映射到新格式枚举；
+   * fontScale（旧版连续缩放）粗略映射到 fontStep 档位。
+   */
   private applyRawClock(card: ScreensaverCardInstance, rawClock: ScreensaverRawClock | undefined): void {
     if (rawClock === undefined) {
       return;
@@ -639,6 +803,7 @@ export class ScreensaverAppModel {
     card.clock.showSeconds = rawClock.showSeconds ?? false;
     const fontStep = rawClock.fontStep;
     if (fontStep !== undefined) {
+      // -1（跟随系统）~ 2（大字号）四档
       card.clock.fontStep = screenSaverClampInt(fontStep, -1, 2);
     } else if (rawClock.fontScale !== undefined) {
       if (rawClock.fontScale >= 1.2) {
@@ -651,6 +816,7 @@ export class ScreensaverAppModel {
     }
   }
 
+  /** Raw 相册配置 → 严格配置。过滤空 uri；兼容旧版 shuffle 布尔 → order 枚举。 */
   private applyRawPhoto(card: ScreensaverCardInstance, rawPhoto: ScreensaverRawPhoto | undefined): void {
     if (rawPhoto === undefined) {
       return;
@@ -677,6 +843,7 @@ export class ScreensaverAppModel {
     card.photo.wifiOnlyPrefetch = rawPhoto.wifiOnlyPrefetch ?? false;
   }
 
+  /** Raw 视频配置 → 严格配置。 */
   private applyRawVideo(card: ScreensaverCardInstance, rawVideo: ScreensaverRawVideo | undefined): void {
     if (rawVideo === undefined) {
       return;
@@ -687,6 +854,7 @@ export class ScreensaverAppModel {
     card.video.muted = rawVideo.muted ?? true;
   }
 
+  /** Raw Git 配置 → 严格配置。weeks 必须在档位白名单里，否则回默认 20。 */
   private applyRawGit(card: ScreensaverCardInstance, rawGit: ScreensaverRawGit | undefined): void {
     if (rawGit === undefined) {
       return;
@@ -706,6 +874,11 @@ export class ScreensaverAppModel {
     card.git.offlineCache = rawGit.offlineCache ?? true;
   }
 
+  // =====================================================================
+  // 内存 → 磁盘（序列化）
+  // =====================================================================
+
+  /** 严格模型 → Raw 结构（写盘前的转换，字段显式一一对应）。 */
   private toRawLayout(): ScreensaverRawLayout {
     const settings = this.layout.settings;
     const rawSettings: ScreensaverRawSettings = {
@@ -726,6 +899,7 @@ export class ScreensaverAppModel {
     return rawLayout;
   }
 
+  /** 卡片列表 → Raw 卡片数组（快照和写盘共用）。 */
   private toRawCards(): ScreensaverRawCard[] {
     const rawCards: ScreensaverRawCard[] = [];
     for (const card of this.layout.cards) {
@@ -775,6 +949,7 @@ export class ScreensaverAppModel {
     return rawCards;
   }
 
+  /** Git 每日数据 → Raw（缓存序列化用）。 */
   private gitDaysToRaw(days: ScreensaverGitDay[]): ScreensaverRawGitDay[] {
     const rawDays: ScreensaverRawGitDay[] = [];
     for (const day of days) {
@@ -784,6 +959,7 @@ export class ScreensaverAppModel {
     return rawDays;
   }
 
+  /** 解析磁盘上的 Git 缓存 JSON。字段缺失给默认值，解析失败返回 undefined。 */
   private parseGitCache(text: string): ScreensaverGitData | undefined {
     try {
       const raw = JSON.parse(text) as ScreensaverRawGitCache;
@@ -809,6 +985,11 @@ export class ScreensaverAppModel {
     }
   }
 
+  // =====================================================================
+  // 界面辅助文案
+  // =====================================================================
+
+  /** 某类型卡片的汇总文案（卡片库列表用：如「4×2 · 已添加」「未添加」）。 */
   cardSummary(cardType: ScreensaverCardType): string {
     const cards = this.cardsOfType(cardType);
     if (cards.length === 0) {
@@ -823,6 +1004,10 @@ export class ScreensaverAppModel {
     return `${defaultCols}×${defaultRows} · 已添加`;
   }
 
+  /**
+   * 单张卡片的摘要文案（首页「我的卡片」列表用）。
+   * 按类型输出当前配置的一句话摘要，让用户不进面板就能了解卡片状态。
+   */
   cardInstanceSummary(card: ScreensaverCardInstance): string {
     if (card.cardType === 'clock') {
       if (card.clock.format === 'timeOnly') {
@@ -850,10 +1035,16 @@ export class ScreensaverAppModel {
     return `@${card.git.username} · ${card.git.weeks} 周`;
   }
 
+  /** 卡片类型目录（卡片库页面遍历渲染用）。 */
   catalogMetas(): ScreensaverCardMeta[] {
     return SCREEN_SAVER_CARD_CATALOG;
   }
 
+  // =====================================================================
+  // Preferences 底层读写
+  // =====================================================================
+
+  /** 懒加载获取偏好存储实例（拿一次缓存一次）。 */
   private async ensureStore(): Promise<preferences.Preferences | undefined> {
     if (this.store !== undefined) {
       return this.store;
@@ -873,6 +1064,7 @@ export class ScreensaverAppModel {
     return this.store;
   }
 
+  /** 把当前布局序列化并写入偏好存储。put + flush 确保真正落盘。 */
   private async persistLayout(): Promise<void> {
     const store = await this.ensureStore();
     if (store === undefined) {
@@ -888,6 +1080,7 @@ export class ScreensaverAppModel {
     }
   }
 
+  /** 写入一个简单键值（引导标记、令牌、Git 缓存）。 */
   private async persistFlag(key: string, value: preferences.ValueType): Promise<void> {
     const store = await this.ensureStore();
     if (store === undefined) {
@@ -903,4 +1096,5 @@ export class ScreensaverAppModel {
   }
 }
 
+// 全局唯一实例（单例）：全应用 import 到的是同一个模型对象。
 export const screenSaverAppModel: ScreensaverAppModel = new ScreensaverAppModel();

@@ -1,3 +1,35 @@
+/**
+ * =============================================================================
+ * 相册卡片设置面板（PhotoSettingsSheet.ets）
+ * =============================================================================
+ *
+ * 【这个文件是干什么的】
+ * 相册卡片的设置抽屉，是四个设置面板里最复杂的一个。
+ * 功能分两大块：
+ *   1. 照片来源：三种方式——
+ *      a. 从图库选择照片（系统 picker，无需任何权限）；
+ *      b. 浏览系统相册（需要相册读取权限，可选「全部照片/收藏/用户相册」）；
+ *      c. 内置示例图片（6 张 raw 资源，释放到应用沙箱后当作本地照片用）。
+ *   2. 播放行为：自动轮播（间隔下限 15s）、切换间隔、播放顺序（随机/时间序）、
+ *      信息显示（拍摄日期/文件名）、预取下一张、删除卡片。
+ *
+ * 【双面板结构】
+ * build() 里用 albumPanelVisible 在两个 @Builder 之间切换：
+ *   - mainPanel：主设置面板；
+ *   - albumSourcePanel：点「来源相册」进入的相册选择子面板（含返回按钮）。
+ *
+ * 【示例图片的实现】
+ * raw 资源不能直接当照片 uri 用，所以 ensureSamplePhotos() 把
+ * raw 文件复制到应用沙箱 filesDir/sample_photos/，返回沙箱路径列表
+ * （file:// 沙箱路径可直接被 Image 组件加载）。
+ *
+ * 【权限设计的三个层次】
+ *   - picker 方式：系统代取，零权限，永远可用（保底方案）；
+ *   - 浏览相册：需要权限，首次点击「加载相册列表」时现场申请；
+ *   - 被永久拒绝：不再弹窗，显示「去开启权限」按钮跳系统设置。
+ * =============================================================================
+ */
+
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import {
@@ -21,7 +53,9 @@ import {
   ScreenSaverAlbumEntry
 } from '../../common/MediaAccess';
 
+/** 「全部照片」相册的固定标识（区别于真实相册 key）。 */
 const ALBUM_ALL_KEY: string = 'all';
+/** 内置示例图片的文件名（对应 resources/rawfile/sample_photos/ 下的资源）。 */
 const SAMPLE_PHOTO_NAMES: string[] = [
   'photo_landscape_4k.jpg',
   'photo_portrait.jpg',
@@ -30,6 +64,7 @@ const SAMPLE_PHOTO_NAMES: string[] = [
   'photo_dark.jpg',
   'photo_wide.jpg'
 ];
+/** 示例图片释放到沙箱时的目录名。 */
 const SAMPLE_PHOTO_DIR: string = 'sample_photos';
 
 interface PhotoOrderOption {
@@ -48,18 +83,29 @@ export struct ScreenSaverPhotoSettingsPanel {
   @Event onDone: () => void = (): void => {};
   @Event onDelete: () => void = (): void => {};
 
+  /** 是否显示相册选择子面板（false = 主面板）。 */
   @Local albumPanelVisible: boolean = false;
+  /** 系统相册列表（进入子面板时加载）。 */
   @Local albumEntries: ScreenSaverAlbumEntry[] = [];
+  /** 相册列表是否已成功加载过（控制「需授权」提示块的显隐）。 */
   @Local albumsLoaded: boolean = false;
+  /** 异步操作进行中标志（防重复点击）。 */
   @Local busy: boolean = false;
+  /** 底部状态文案（如「已选择 12 张照片」）。 */
   @Local statusText: string = '';
+  /** 预览区的手动换图种子：点一次预览 +1，PhotoCard 收到变化就切下一张。 */
   @Local previewSeed: number = 0;
+  /** 「全部照片」的总张数（-1 表示还没查过）。 */
   @Local allPhotoCount: number = -1;
 
   private uiContext(): common.UIAbilityContext | undefined {
     return this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
   }
 
+  /**
+   * 方式一：系统 picker 选照片（最多 50 张）。
+   * 零权限、一次可多选；选完直接写入 card.photo.uris 并持久化。
+   */
   private async pickPhotos(): Promise<void> {
     if (this.busy) {
       return;
@@ -79,6 +125,10 @@ export struct ScreenSaverPhotoSettingsPanel {
     }
   }
 
+  /**
+   * 方式三：使用内置示例图片。
+   * ensureSamplePhotos() 把 raw 资源释放到沙箱，返回沙箱路径当作照片 uri。
+   */
   private async useSamplePhotos(): Promise<void> {
     if (this.busy) {
       return;
@@ -103,6 +153,11 @@ export struct ScreenSaverPhotoSettingsPanel {
     }
   }
 
+  /**
+   * 把 rawfile 里的示例图片复制到应用沙箱（只复制一次，已存在则跳过）。
+   * 返回沙箱里的文件路径列表——这些路径可以直接被 Image 组件加载。
+   * raw 资源本身不能作为照片 uri 使用，必须先「释放」到沙箱。
+   */
   private async ensureSamplePhotos(context: common.UIAbilityContext, sampleDir: string): Promise<string[]> {
     try {
       fileIo.mkdirSync(sampleDir);
@@ -112,6 +167,7 @@ export struct ScreenSaverPhotoSettingsPanel {
     const paths: string[] = [];
     for (const name of SAMPLE_PHOTO_NAMES) {
       const targetPath = `${sampleDir}/${name}`;
+      // 已释放过就跳过（accessSync 不存在会抛异常，按不存在处理）
       let exists = false;
       try {
         exists = fileIo.accessSync(targetPath);
@@ -132,12 +188,18 @@ export struct ScreenSaverPhotoSettingsPanel {
     return paths;
   }
 
+  /** 清空照片列表（卡片会显示空态占位）。 */
   private clearPhotos(): void {
     this.card.photo.uris = [];
     screenSaverAppModel.save();
     this.statusText = '已清空照片';
   }
 
+  /**
+   * 方式二的前置步骤：加载系统相册列表。
+   * 先现场申请相册读取权限；被拒绝则记入标记（用于显示「去开启权限」按钮）
+   * 并提示用户仍可用 picker 方式。
+   */
   private async loadAlbums(): Promise<void> {
     if (this.busy) {
       return;
@@ -165,6 +227,11 @@ export struct ScreenSaverPhotoSettingsPanel {
     }
   }
 
+  /**
+   * 选中某个相册：拉取该相册全部照片的 uri + 拍摄日期，
+   * 写入卡片并持久化，然后退回主面板。
+   * uriDates 是「uri → 日期」映射，供卡片空态/信息条显示拍摄日期。
+   */
   private async selectAlbum(key: string): Promise<void> {
     if (this.busy) {
       return;
@@ -200,6 +267,7 @@ export struct ScreenSaverPhotoSettingsPanel {
     }
   }
 
+  /** 跳系统授权设置界面（权限被永久拒绝后的补救入口）。 */
   private async openPermissionSetting(): Promise<void> {
     const context = this.uiContext();
     if (context === undefined) {
@@ -208,6 +276,10 @@ export struct ScreenSaverPhotoSettingsPanel {
     await screenSaverMediaAccess.openPermissionSetting(context);
   }
 
+  /**
+   * 来源相册的显示名：
+   * 'all' → 全部照片；'favorite' → 收藏；'user:xxx' → 去掉前缀显示相册名。
+   */
   private albumLabel(): string {
     const key = this.card.photo.sourceAlbum;
     if (key === ALBUM_ALL_KEY) {
@@ -222,6 +294,7 @@ export struct ScreenSaverPhotoSettingsPanel {
     return key;
   }
 
+  /** 弹 toast 提示。 */
   private toast(message: string): void {
     try {
       this.getUIContext().getPromptAction().showToast({ message: message, duration: 1500 });
@@ -231,6 +304,10 @@ export struct ScreenSaverPhotoSettingsPanel {
     }
   }
 
+  /**
+   * 千分位格式化（12345 → 12,345）。
+   * 手写循环实现，避免依赖 Intl（ArkTS 环境下更可控）。
+   */
   private formatCount(value: number): string {
     const text = value.toString();
     let out = '';
@@ -245,9 +322,15 @@ export struct ScreenSaverPhotoSettingsPanel {
     return out;
   }
 
+  /**
+   * ================= 相册选择子面板 =================
+   * 「全部照片」+ 系统相册列表 + 「新建相册…」（引导去系统图库）。
+   * 未加载过列表时显示授权提示块；被拒过后追加「去开启权限」按钮。
+   */
   @Builder
   albumSourcePanel() {
     Column() {
+      // ---------- 子面板顶栏 ----------
       Row() {
         Text('选择相册')
           .fontSize(15)
@@ -266,6 +349,7 @@ export struct ScreenSaverPhotoSettingsPanel {
 
       Scroll() {
         Column({ space: 8 }) {
+          // ---------- 全部照片 ----------
           Row() {
             Text('全部照片')
               .fontSize(14)
@@ -290,6 +374,7 @@ export struct ScreenSaverPhotoSettingsPanel {
             void this.selectAlbum(ALBUM_ALL_KEY);
           })
 
+          // ---------- 系统相册列表 ----------
           ForEach(this.albumEntries, (entry: ScreenSaverAlbumEntry) => {
             Row() {
               Text(entry.name)
@@ -318,6 +403,8 @@ export struct ScreenSaverPhotoSettingsPanel {
             })
           }, (entry: ScreenSaverAlbumEntry): string => entry.key)
 
+          // ---------- 新建相册（引导） ----------
+          // 三方应用无法替用户建相册，只能提示去系统图库操作。
           Row() {
             Text('新建相册…')
               .fontSize(13)
@@ -329,6 +416,7 @@ export struct ScreenSaverPhotoSettingsPanel {
             this.toast('请在系统图库中新建相册后再回到这里选择');
           })
 
+          // ---------- 授权提示块（列表未加载时显示） ----------
           if (!this.albumsLoaded) {
             Text('浏览系统相册需要相册读取权限；也可以直接使用「从图库选择照片」，无需授权')
               .fontSize(11)
@@ -374,6 +462,11 @@ export struct ScreenSaverPhotoSettingsPanel {
     .height('100%')
   }
 
+  /**
+   * ================= 主设置面板 =================
+   * 实时预览（点击可手动换图）→ 来源相册/三个操作按钮 →
+   * 自动轮播/间隔/顺序 → 信息显示/预取 → 删除卡片。
+   */
   @Builder
   mainPanel() {
     Column() {
@@ -387,6 +480,8 @@ export struct ScreenSaverPhotoSettingsPanel {
 
       Scroll() {
         Column({ space: 12 }) {
+          // ---------- 实时预览 ----------
+          // 点一下预览区就手动切换下一张（previewSeed+1 触发卡片刷新）。
           Column() {
             ScreensaverPhotoCard({
               card: this.card,
@@ -404,6 +499,7 @@ export struct ScreenSaverPhotoSettingsPanel {
             this.previewSeed++;
           })
 
+          // ---------- 来源相册入口 ----------
           Row() {
             Text('来源相册')
               .fontSize(14)
@@ -419,6 +515,7 @@ export struct ScreenSaverPhotoSettingsPanel {
           }
           .width('100%')
 
+          // ---------- 三个来源操作 ----------
           Row({ space: 8 }) {
             ScreenSaverChip({
               label: this.busy ? '请稍候…' : '从图库选择照片',
@@ -441,6 +538,7 @@ export struct ScreenSaverPhotoSettingsPanel {
           }
           .width('100%')
 
+          // ---------- 已选数量 + 状态 ----------
           Row() {
             Text(`已选 ${this.card.photo.uris.length} 张`)
               .fontSize(12)
@@ -456,6 +554,8 @@ export struct ScreenSaverPhotoSettingsPanel {
           }
           .width('100%')
 
+          // ---------- 自动轮播 ----------
+          // intervalSec === 0 表示关闭；打开时取默认间隔（下限 15s）。
           ScreenSaverToggleRow({
             label: '自动轮播',
             tip: '间隔下限 15s，关闭后仅手动切换',
@@ -466,6 +566,7 @@ export struct ScreenSaverPhotoSettingsPanel {
             }
           })
 
+          // ---------- 切换间隔（仅开启轮播时显示） ----------
           if (this.card.photo.intervalSec > 0) {
             Row() {
               Text('切换间隔')
@@ -488,6 +589,7 @@ export struct ScreenSaverPhotoSettingsPanel {
             .width('100%')
           }
 
+          // ---------- 播放顺序 ----------
           Row() {
             Text('播放顺序')
               .fontSize(14)
@@ -508,6 +610,8 @@ export struct ScreenSaverPhotoSettingsPanel {
           }
           .width('100%')
 
+          // ---------- 信息显示 ----------
+          // 显示拍摄日期（无则回退文件名）。
           ScreenSaverToggleRow({
             label: '信息显示',
             tip: '显示拍摄日期，无则显示文件名',
@@ -518,6 +622,7 @@ export struct ScreenSaverPhotoSettingsPanel {
             }
           })
 
+          // ---------- 预取下一张 ----------
           ScreenSaverToggleRow({
             label: '预取下一张',
             tip: '提前准备下一张照片，切换更顺滑',

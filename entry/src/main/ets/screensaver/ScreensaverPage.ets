@@ -1,4 +1,46 @@
-﻿import { mediaquery } from '@kit.ArkUI';
+﻿/**
+ * =============================================================================
+ * 屏保播放页（ScreensaverPage.ets）—— 整个应用的核心页面
+ * =============================================================================
+ *
+ * 【这个文件是干什么的】
+ * 全屏屏保页：4×8 网格上自由摆放时钟/相册/视频/Git 卡片。
+ * 一个页面承载了五种交互状态：
+ *   1. 播放态：卡片正常运转（时钟走字、照片轮播），点击唤出退出胶囊；
+ *   2. 胶囊态：点屏幕出现「退出屏保」胶囊，几秒后自动淡出；
+ *   3. 编辑态：长按进入，卡片可拖动换位、拉伸右下角改尺寸、
+ *      单击选中、双击（再点）打开设置、× 删除、＋ 添加；
+ *   4. 空态：一张卡片都没有时显示兜底时钟 + 引导文案；
+ *   5. Sheet 态：编辑态下点卡片弹出对应设置面板（bindSheet）。
+ *
+ * 【防烧屏（burn-in）机制】
+ * AMOLED 屏长时间显示静止内容会留残影。方案：每 15 分钟把「时钟」
+ * 卡片微微挪动一次（5 组预设偏移轮流切换，编辑态不挪）。
+ * 只挪时钟是因为它是唯一 24 小时纯静止内容的卡片。
+ *
+ * 【低电量自动退出】
+ * 每 60 秒查一次电量：≤20%、非充电、非编辑态、且开关打开 →
+ * toast 提示后自动退出屏保（省电优先）。
+ *
+ * 【编辑的安全网：快照】
+ * 进入编辑态先 snapshotCards() 存一份布局文本快照；
+ * 「取消」= restoreCardsFromSnapshot 回滚，「完成」= 保留改动。
+ * 拖到一半误触取消也不怕。
+ *
+ * 【拖动/拉伸的手势数学】
+ * 手指位移（vp）÷ 单元格尺寸 = 移动了几个格子（四舍五入）；
+ * 拖动时 canPlace 实时校验目标格合法性，非法则描红边；
+ * 松手非法 → 卡片弹回原位（animateOffsetsToZero 回弹动画）+ toast。
+ * 拉伸（右下角手柄）同理，改的是 colSpan/rowSpan。
+ *
+ * 【断点适配】
+ * 手机 4×8、折叠屏 8×8、平板 12×7（见 Breakpoints.ets）。
+ * 宽屏播放态用 reflowForColumns 把手机布局重排到宽网格；
+ * 编辑态永远回 4×8（编辑跨设备一致性），宽屏编辑网格限宽 480。
+ * =============================================================================
+ */
+
+import { mediaquery } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { ScreenSaverLogger } from '../common/Logger';
@@ -36,12 +78,23 @@ import {
 } from '../model/ConfigModels';
 
 const FALLBACK_CARD_ID: string = 'fallback_clock';
+/** 宽屏（折叠屏/平板）编辑态下网格的最大宽度，保证编辑视图不会太宽。 */
 const SCREEN_SAVER_EDIT_MAX_WIDTH: number = 480;
+/** 防烧屏位移间隔：15 分钟挪一次。 */
 const SCREEN_SAVER_BURN_IN_INTERVAL_MS: number = 15 * 60 * 1000;
+/** 低电量轮询间隔：60 秒查一次。 */
 const SCREEN_SAVER_BATTERY_POLL_MS: number = 60 * 1000;
+/** 低电量阈值：电量百分比 ≤ 20 触发退出。 */
 const SCREEN_SAVER_LOW_BATTERY_SOC: number = 20;
+/**
+ * 防烧屏偏移表（vp）：五组偏移轮流使用。
+ * 位移很小（≤5vp），肉眼几乎察觉不到，但能改变像素点亮周期。
+ */
 const SCREEN_SAVER_BURN_IN_OFFSETS: number[][] = [[0, 0], [5, -3], [-3, 5], [-5, -3], [3, 5]];
 
+/**
+ * 构建空态兜底时钟卡片（不进布局，只是本地展示用的假实例）。
+ */
 function buildFallbackCard(): ScreensaverCardInstance {
   const card = new ScreensaverCardInstance();
   card.id = FALLBACK_CARD_ID;
@@ -56,44 +109,92 @@ function buildFallbackCard(): ScreensaverCardInstance {
 export struct ScreenSaverPlayPage {
   @Param navStack: NavPathStack = new NavPathStack();
 
+  // ============ 状态标志（@Local：组件内响应式） ============
+  /** 整页透明度：进出场动画用（0 透明 → 1 完全显示）。 */
   @Local displayOpacity: number = 0;
+  /** 「退出屏保」胶囊是否可见。 */
   @Local capsuleVisible: boolean = false;
+  /** 是否处于编辑模式。 */
   @Local editMode: boolean = false;
+  /** 进入编辑模式的过渡进度（0→1，驱动卡片缩放到 0.96 的入场感）。 */
   @Local editProgress: number = 0;
+  /** 编辑态当前选中的卡片 id（'' = 无选中）。 */
   @Local selectedCardId: string = '';
+  /** 设置面板（bindSheet）是否可见。 */
   @Local sheetVisible: boolean = false;
+  /** 设置面板类型：clock/photo/video/git/none。 */
   @Local sheetKind: SheetKind = 'none';
+  /** 设置面板对应的卡片 id。 */
   @Local sheetCardId: string = '';
+
+  // ============ 拖动状态 ============
+  /** 正在拖动的卡片 id（'' = 没在拖）。 */
   @Local dragCardId: string = '';
+  /** 拖动产生的 X 位移（vp），实时作用到卡片 offset 上。 */
   @Local dragOffsetX: number = 0;
+  /** 拖动产生的 Y 位移（vp）。 */
   @Local dragOffsetY: number = 0;
+  /** 拖动目标格非法（重叠/越界）标志——给卡片描红边。 */
   @Local dragInvalid: boolean = false;
+
+  // ============ 拉伸（改尺寸）状态 ============
+  /** 正在拉伸的卡片 id。 */
   @Local resizeCardId: string = '';
   @Local resizeOffsetX: number = 0;
   @Local resizeOffsetY: number = 0;
+  /** 拉伸时显示的尺寸标签（如「4×2」）。 */
   @Local resizeLabel: string = '';
+
+  // ============ 断点/网格 ============
+  /** 当前断点的列数（播放态用，编辑态固定 4）。 */
   @Local columns: number = SCREEN_SAVER_GRID_COLS;
+  /** 当前断点的行数（播放态用，编辑态固定 8）。 */
   @Local rows: number = SCREEN_SAVER_GRID_ROWS;
+  /** 是否宽屏断点（≥600vp）。 */
   @Local isWide: boolean = false;
+  /** 页面是否活跃（aboutToDisappear 置 false，让卡片停止刷新）。 */
   @Local pageActive: boolean = true;
+  /** 空态兜底时钟（本地实例，不进布局）。 */
   @Local fallbackCard: ScreensaverCardInstance = buildFallbackCard();
+  /** 防烧屏当前 X 偏移（vp）。 */
   @Local burnInShiftX: number = 0;
+  /** 防烧屏当前 Y 偏移（vp）。 */
   @Local burnInShiftY: number = 0;
 
+  // ============ 非响应式私有字段 ============
+  /** 胶囊自动隐藏定时器 id（-1 = 无定时器）。 */
   private capsuleTimer: number = -1;
+  /** 防烧屏定时器 id。 */
   private burnInTimer: number = -1;
+  /** 低电量轮询定时器 id。 */
   private batteryTimer: number = -1;
+  /** 防烧屏偏移表当前步进（0~4 循环）。 */
   private burnInStep: number = 0;
+  /** 网格实际渲染宽度（vp，onAreaChange 回调里更新，拖动换算用）。 */
   private gridW: number = 0;
+  /** 网格实际渲染高度（vp）。 */
   private gridH: number = 0;
+  /** 拖动手势起点坐标（vp）。 */
   private touchStartX: number = 0;
   private touchStartY: number = 0;
+  /** 拉伸手势起点坐标（vp）。 */
   private resizeTouchStartX: number = 0;
   private resizeTouchStartY: number = 0;
+  /** 编辑模式快照（JSON 文本），「取消」时回滚。 */
   private editSnapshotText: string = '';
+  /** 宽屏重排后的卡片位置表（与 layout.cards 下标一一对应）。 */
   private widePositions: ScreensaverGridPos[] = [];
+  /** 断点观察者（监听窗口宽度变化切换网格规格）。 */
   private breakpointObserver: ScreenSaverBreakpointObserver = new ScreenSaverBreakpointObserver();
 
+  /**
+   * 页面出现：
+   * 1. 进入「屏保窗口模式」：保持亮屏 + 沉浸式全屏（按设置决定 keepScreenOn）；
+   * 2. 启动断点监听；
+   * 3. 进场淡入动画（减弱动效时直接显示，不播动画）；
+   * 4. Git 卡片先显示本地缓存（hydrate），避免白等网络；
+   * 5. 启动防烧屏定时器和低电量轮询。
+   */
   aboutToAppear(): void {
     const context = this.getUIContext().getHostContext();
     if (context !== undefined) {
@@ -104,6 +205,7 @@ export struct ScreenSaverPlayPage {
       (value: ScreenSaverBreakpoint): void => {
         this.onBreakpointChanged(value);
       });
+    // 进场动画：opacity 0 → 1（motionDuration 会按「减弱动效」设置压缩时长，0 则跳过）
     const enterMs = screenSaverMotionDuration(SCREEN_SAVER_MOTION_ENTER_MS);
     if (enterMs <= 0) {
       this.displayOpacity = 1;
@@ -120,6 +222,10 @@ export struct ScreenSaverPlayPage {
     this.startBatteryWatch();
   }
 
+  /**
+   * 页面消失（退出屏保）：
+   * 清掉所有定时器 → 退出屏保窗口模式 → 强制把未落盘的改动刷盘。
+   */
   aboutToDisappear(): void {
     this.stopCapsuleTimer();
     this.stopBurnInTimer();
@@ -133,6 +239,10 @@ export struct ScreenSaverPlayPage {
     void screenSaverAppModel.flush();
   }
 
+  /**
+   * 断点变化：更新网格列行数；宽屏时把手机布局重排（reflow）到宽网格，
+   * 播放态优先用重排结果。
+   */
   private onBreakpointChanged(value: ScreenSaverBreakpoint): void {
     this.columns = value.columns;
     this.rows = value.rows;
@@ -144,6 +254,7 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /** 当前布局里的卡片列表（单一数据源 AppModel）。 */
   private cards(): ScreensaverCardInstance[] {
     return screenSaverAppModel.layout.cards;
   }
@@ -152,6 +263,11 @@ export struct ScreenSaverPlayPage {
     return screenSaverAppModel.layout.cards[index];
   }
 
+  /**
+   * 计算卡片 index 的渲染位置：
+   * 播放态 + 宽屏 → 用重排位置表（widePositions）；
+   * 其余情况（编辑态、窄屏）→ 用卡片自身存储的位置。
+   */
   private positionOf(index: number, card: ScreensaverCardInstance): ScreensaverGridPos {
     if (!this.editMode && this.isWide && index < this.widePositions.length) {
       return this.widePositions[index];
@@ -165,6 +281,9 @@ export struct ScreenSaverPlayPage {
     return pos;
   }
 
+  /**
+   * 生成 Grid 的等分模板："1fr 1fr 1fr 1fr"（列数/行数动态）。
+   */
   private templateOf(count: number): string {
     let text = '';
     for (let index = 0; index < count; index++) {
@@ -173,6 +292,10 @@ export struct ScreenSaverPlayPage {
     return text;
   }
 
+  /**
+   * 进入编辑模式：
+   * 震动反馈 → 存布局快照（供「取消」回滚）→ 播放入场过渡。
+   */
   private enterEditMode(): void {
     if (this.editMode) {
       return;
@@ -181,6 +304,7 @@ export struct ScreenSaverPlayPage {
     screenSaverVibration.longPressFeedback();
     this.editSnapshotText = screenSaverAppModel.snapshotCards();
     this.editMode = true;
+    // 编辑入场：editProgress 0 → 1（卡片随之缩到 0.96）
     const duration = screenSaverMotionDuration(SCREEN_SAVER_MOTION_EDIT_ENTER_MS);
     if (duration <= 0) {
       this.editProgress = 1;
@@ -195,6 +319,11 @@ export struct ScreenSaverPlayPage {
     this.hideCapsule();
   }
 
+  /**
+   * 退出编辑模式。
+   * restore=true：用快照回滚布局（「取消」）；
+   * restore=false：保留改动（「完成」/系统返回键）。
+   */
   private exitEditMode(restore: boolean): void {
     if (restore) {
       screenSaverAppModel.restoreCardsFromSnapshot(this.editSnapshotText);
@@ -206,6 +335,9 @@ export struct ScreenSaverPlayPage {
     this.closeSheet();
   }
 
+  /**
+   * 显示「退出屏保」胶囊：几秒后自动淡出（capsuleAutoHideMs）。
+   */
   private showCapsule(): void {
     if (this.editMode) {
       return;
@@ -219,11 +351,13 @@ export struct ScreenSaverPlayPage {
     }, SCREEN_SAVER_METRICS.capsuleAutoHideMs);
   }
 
+  /** 立即隐藏胶囊（无动画）。 */
   private hideCapsule(): void {
     this.stopCapsuleTimer();
     this.capsuleVisible = false;
   }
 
+  /** 带淡出动画隐藏胶囊（自动超时用）。 */
   private hideCapsuleWithFade(): void {
     this.stopCapsuleTimer();
     const duration = screenSaverMotionDuration(SCREEN_SAVER_MOTION_CAPSULE_MS);
@@ -239,6 +373,7 @@ export struct ScreenSaverPlayPage {
     });
   }
 
+  /** 清除胶囊自动隐藏定时器。 */
   private stopCapsuleTimer(): void {
     if (this.capsuleTimer >= 0) {
       clearTimeout(this.capsuleTimer);
@@ -246,6 +381,9 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /**
+   * 启动防烧屏定时器：每 15 分钟切换到下一组偏移。
+   */
   private startBurnInTimer(): void {
     this.burnInTimer = setInterval((): void => {
       this.burnInStep = (this.burnInStep + 1) % SCREEN_SAVER_BURN_IN_OFFSETS.length;
@@ -255,6 +393,7 @@ export struct ScreenSaverPlayPage {
     }, SCREEN_SAVER_BURN_IN_INTERVAL_MS);
   }
 
+  /** 停止防烧屏定时器并复位偏移。 */
   private stopBurnInTimer(): void {
     if (this.burnInTimer >= 0) {
       clearInterval(this.burnInTimer);
@@ -264,6 +403,11 @@ export struct ScreenSaverPlayPage {
     this.burnInShiftY = 0;
   }
 
+  /**
+   * 计算卡片 X 方向的防烧屏位移：
+   * 编辑态不挪（否则拖动/布局坐标会乱）；只有时钟卡片挪
+   * （其它卡片内容本身会动，不存在像素长期点亮问题）。
+   */
   private burnInX(card: ScreensaverCardInstance): number {
     if (this.editMode || card.cardType !== 'clock') {
       return 0;
@@ -271,6 +415,7 @@ export struct ScreenSaverPlayPage {
     return this.burnInShiftX;
   }
 
+  /** Y 方向防烧屏位移（规则同 burnInX）。 */
   private burnInY(card: ScreensaverCardInstance): number {
     if (this.editMode || card.cardType !== 'clock') {
       return 0;
@@ -278,6 +423,9 @@ export struct ScreenSaverPlayPage {
     return this.burnInShiftY;
   }
 
+  /**
+   * 启动低电量轮询：立即查一次，之后每 60 秒查一次。
+   */
   private startBatteryWatch(): void {
     this.checkBattery();
     this.batteryTimer = setInterval((): void => {
@@ -285,6 +433,7 @@ export struct ScreenSaverPlayPage {
     }, SCREEN_SAVER_BATTERY_POLL_MS);
   }
 
+  /** 停止低电量轮询。 */
   private stopBatteryWatch(): void {
     if (this.batteryTimer >= 0) {
       clearInterval(this.batteryTimer);
@@ -292,6 +441,12 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /**
+   * 低电量检查：
+   * 编辑态不打扰 / 开关没开不查 / 电量 >20% 或 ≤0（读取异常）不退 /
+   * 充电中不退（充电时耗电无所谓）。
+   * 满足全部条件 → toast + 自动退出屏保。
+   */
   private checkBattery(): void {
     if (this.editMode || !screenSaverAppModel.layout.settings.lowBatteryAutoExit) {
       return;
@@ -307,6 +462,9 @@ export struct ScreenSaverPlayPage {
     this.exitScreensaver();
   }
 
+  /**
+   * 播放态点击屏幕：切换胶囊显隐（编辑态不响应）。
+   */
   private handleScreenTap(): void {
     ScreenSaverLogger.info(`screen tap, editMode=${this.editMode}, capsule=${this.capsuleVisible}`);
     if (this.editMode) {
@@ -319,11 +477,15 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /**
+   * 退出屏保：淡出动画 → navStack.pop() 返回主页。
+   */
   private exitScreensaver(): void {
     const duration = screenSaverMotionDuration(SCREEN_SAVER_MOTION_EXIT_MS);
     ScreenSaverLogger.info('exit screensaver');
     this.hideCapsule();
     if (duration <= 0) {
+      // 减弱动效：直接关
       this.displayOpacity = 0;
       this.navStack.pop();
       return;
@@ -339,10 +501,14 @@ export struct ScreenSaverPlayPage {
     });
   }
 
+  /** 编辑态选中一张卡片。 */
   private selectCard(cardId: string): void {
     this.selectedCardId = cardId;
   }
 
+  /**
+   * 为选中卡片打开指定类型的设置面板（未选中先提示）。
+   */
   private openSheetForSelected(kind: SheetKind): void {
     if (this.selectedCardId.length === 0) {
       this.toast('请先选择一张卡片');
@@ -353,6 +519,9 @@ export struct ScreenSaverPlayPage {
     this.sheetVisible = true;
   }
 
+  /**
+   * 按选中卡片的类型打开对应设置面板（类型由卡片自身决定）。
+   */
   private openSettingsForSelected(): void {
     const card = screenSaverAppModel.cardById(this.selectedCardId);
     if (card === undefined) {
@@ -362,11 +531,13 @@ export struct ScreenSaverPlayPage {
     this.openSheetForSelected(card.cardType);
   }
 
+  /** 关闭设置面板。 */
   private closeSheet(): void {
     this.sheetVisible = false;
     this.sheetKind = 'none';
   }
 
+  /** 直接移除选中卡片（设置面板里的「删除」入口，无确认——面板本身已是明确操作）。 */
   private removeSelected(): void {
     if (this.selectedCardId.length === 0) {
       return;
@@ -375,6 +546,9 @@ export struct ScreenSaverPlayPage {
     this.selectedCardId = '';
   }
 
+  /**
+   * 编辑态点 × 删除卡片：弹系统确认对话框（危险操作二次确认）。
+   */
   private confirmRemoveCard(cardId: string): void {
     this.getUIContext().showAlertDialog({
       title: '移除卡片',
@@ -396,10 +570,14 @@ export struct ScreenSaverPlayPage {
     });
   }
 
+  /** 跳转卡片库页面（编辑态点「＋ 添加卡片」）。 */
   private addCardViaLibrary(): void {
     this.navStack.pushPathByName('library', '');
   }
 
+  // ==================== 拖动（移动卡片）====================
+
+  /** 开始拖动：记录卡片 id，清零位移，顺带选中它。 */
   private beginDrag(cardId: string): void {
     ScreenSaverLogger.info(`begin drag ${cardId}`);
     this.dragCardId = cardId;
@@ -409,6 +587,10 @@ export struct ScreenSaverPlayPage {
     this.selectCard(cardId);
   }
 
+  /**
+   * 拖动中：更新位移；并把目标格合法性实时算出来
+   * （非法时卡片描红边，用户在松手前就知道放不下）。
+   */
   private updateDrag(cardId: string, offsetX: number, offsetY: number): void {
     if (this.dragCardId !== cardId) {
       return;
@@ -424,6 +606,11 @@ export struct ScreenSaverPlayPage {
       card.rowSpan);
   }
 
+  /**
+   * 把手指位移（vp）换算成目标格子坐标：
+   * 位移 ÷ 单元格尺寸 = 格子增量（四舍五入到最近的格），
+   * 再 clamp 到网格边界内。
+   */
   private targetSlot(card: ScreensaverCardInstance, offsetX: number, offsetY: number): ScreensaverGridPos {
     const cellWidth = this.gridW / SCREEN_SAVER_GRID_COLS;
     const cellHeight = this.cellHeight();
@@ -442,6 +629,12 @@ export struct ScreenSaverPlayPage {
     return pos;
   }
 
+  /**
+   * 松手提交拖动：
+   * - 非法 → 弹回原位（回弹动画）+ toast；
+   * - 位移不足一格 → 吸附回原位（快速归零动画）；
+   * - 合法 → moveCard 真正改坐标（模型校验失败同样回弹）。
+   */
   private commitDrag(cardId: string): void {
     const offsetX = this.dragOffsetX;
     const offsetY = this.dragOffsetY;
@@ -463,6 +656,7 @@ export struct ScreenSaverPlayPage {
     const deltaCol = target.colStart - card.colStart;
     const deltaRow = target.rowStart - card.rowStart;
     if (deltaCol === 0 && deltaRow === 0) {
+      // 没挪出格子：吸附动画归位即可
       this.animateOffsetsToZero(screenSaverSnapDuration());
       return;
     }
@@ -475,6 +669,10 @@ export struct ScreenSaverPlayPage {
     this.resetDragOffsets();
   }
 
+  /**
+   * 把拖动位移动画归零（回弹/吸附的视觉过渡）。
+   * 注意：moveCard 成功时直接 reset（新格子坐标立即生效，不做归零动画）。
+   */
   private animateOffsetsToZero(duration: number): void {
     if (duration <= 0) {
       this.resetDragOffsets();
@@ -492,11 +690,13 @@ export struct ScreenSaverPlayPage {
     });
   }
 
+  /** 直接清零拖动位移。 */
   private resetDragOffsets(): void {
     this.dragOffsetX = 0;
     this.dragOffsetY = 0;
   }
 
+  /** 单元格高度（vp）；网格还没量出来时返回 1 防止除零。 */
   private cellHeight(): number {
     if (this.gridH <= 0) {
       return 1;
@@ -504,6 +704,9 @@ export struct ScreenSaverPlayPage {
     return this.gridH / SCREEN_SAVER_GRID_ROWS;
   }
 
+  // ==================== 拉伸（改尺寸）====================
+
+  /** 开始拉伸：记录卡片 id，显示当前尺寸标签，顺带选中它。 */
   private beginResize(cardId: string): void {
     ScreenSaverLogger.info(`begin resize ${cardId}`);
     this.resizeCardId = cardId;
@@ -516,6 +719,7 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /** 拉伸中：实时更新尺寸标签（如「4×2」→「4×3」）。 */
   private updateResize(cardId: string, offsetX: number, offsetY: number): void {
     if (this.resizeCardId !== cardId) {
       return;
@@ -528,6 +732,10 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /**
+   * 把拉伸位移换算成预览尺寸（colSpan/rowSpan）：
+   * 起点固定，位移 ÷ 单元格尺寸 = 跨格增量，clamp 到 [1, 边界]。
+   */
   private targetSpan(offsetX: number, offsetY: number): ScreensaverGridPos | undefined {
     const card = screenSaverAppModel.cardById(this.resizeCardId);
     if (card === undefined || this.gridW <= 0) {
@@ -550,6 +758,10 @@ export struct ScreenSaverPlayPage {
     return pos;
   }
 
+  /**
+   * 松手提交拉伸：尺寸没变就什么都不做；
+   * 变了则 resizeCardTo（带碰撞/最小尺寸校验），失败 toast 原因。
+   */
   private commitResize(cardId: string): void {
     const offsetX = this.resizeOffsetX;
     const offsetY = this.resizeOffsetY;
@@ -577,6 +789,7 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /** commitResize 用的尺寸换算（此时 resizeCardId 已被清空，改按参数取卡片）。 */
   private targetSpanFor(cardId: string, offsetX: number, offsetY: number): ScreensaverGridPos | undefined {
     const card = screenSaverAppModel.cardById(cardId);
     if (card === undefined || this.gridW <= 0) {
@@ -599,6 +812,7 @@ export struct ScreenSaverPlayPage {
     return pos;
   }
 
+  /** 弹 toast 提示。 */
   private toast(message: string): void {
     try {
       this.getUIContext().getPromptAction().showToast({ message: message, duration: 1500 });
@@ -608,6 +822,14 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  // ==================== 触摸事件分发 ====================
+
+  /**
+   * 卡片本体触摸（编辑态的拖动）：
+   * Down 记起点并 beginDrag；Move 更新位移；
+   * Up/Cancel 提交（commitDrag）。
+   * 播放态完全忽略（返回，让点击透传给页面）。
+   */
   private onCellTouch(card: ScreensaverCardInstance, event: TouchEvent): void {
     if (!this.editMode) {
       return;
@@ -616,6 +838,7 @@ export struct ScreenSaverPlayPage {
     if (touch === undefined) {
       return;
     }
+    // px2vp：物理像素转视觉像素（手势计算统一用 vp）
     const x = px2vp(touch.windowX);
     const y = px2vp(touch.windowY);
     if (event.type === TouchType.Down) {
@@ -633,6 +856,11 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  /**
+   * 右下角拉伸手柄触摸（编辑态的改尺寸）。
+   * stopPropagation：手柄事件不冒泡给卡片的拖动逻辑。
+   * 流程与 onCellTouch 对称：Down 起手 → Move 预览 → Up 提交。
+   */
   private onHandleTouch(card: ScreensaverCardInstance, event: TouchEvent): void {
     if (!this.editMode) {
       return;
@@ -659,6 +887,12 @@ export struct ScreenSaverPlayPage {
     }
   }
 
+  // ==================== UI 构建 ====================
+
+  /**
+   * 空态：一张卡片都没有时，显示兜底时钟 + 操作引导。
+   * 兜底时钟同样享受防烧屏位移。
+   */
   @Builder
   emptyState() {
     Column({ space: 10 }) {
@@ -687,6 +921,10 @@ export struct ScreenSaverPlayPage {
     })
   }
 
+  /**
+   * 编辑态网格线覆盖层：4×8 半透明描边格子。
+   * hitTestBehavior(None)：纯装饰，不拦截任何触摸。
+   */
   @Builder
   gridOverlay() {
     Column() {
@@ -712,6 +950,10 @@ export struct ScreenSaverPlayPage {
     .hitTestBehavior(HitTestMode.None)
   }
 
+  /**
+   * 编辑态顶栏：取消（回滚快照）/ 标题 / 完成（保留改动）。
+   * hitTestBehavior(None) 让空白区域把触摸透传给下面的网格。
+   */
   @Builder
   editTopBar() {
     Row() {
@@ -740,6 +982,9 @@ export struct ScreenSaverPlayPage {
     .hitTestBehavior(HitTestMode.None)
   }
 
+  /**
+   * 编辑态底栏：「＋ 添加卡片」（跳卡片库）+ 操作提示文案。
+   */
   @Builder
   editBottomBar() {
     Row() {
@@ -769,6 +1014,10 @@ export struct ScreenSaverPlayPage {
     .hitTestBehavior(HitTestMode.None)
   }
 
+  /**
+   * 设置面板内容：按 sheetKind 挂载对应面板组件。
+   * 每个面板都传 card（面板直接改 card 字段 + save）和两个回调。
+   */
   @Builder
   sheetContent() {
     Column() {
@@ -822,14 +1071,24 @@ export struct ScreenSaverPlayPage {
     .height('100%')
   }
 
+  /** 取设置面板对应的卡片实例（找不到给个空实例兜底）。 */
   private sheetCard(): ScreensaverCardInstance {
     const card = screenSaverAppModel.cardById(this.sheetCardId);
     return card !== undefined ? card : new ScreensaverCardInstance();
   }
 
+  /**
+   * 单张卡片单元格（Stack 多层叠加）：
+   *   底层：停用占位（虚线框 + 类型名）或真正的卡片组件 CardHost；
+   *   编辑层：选中描边 + × 删除角标、非法拖动红边、拉伸尺寸标签；
+   *   手柄层：右下角拉伸手柄（40vp 热区，28vp 可见圆点）。
+   * 外层容器负责：圆角裁剪、编辑态缩放 0.96、拖动 offset/zIndex、
+   * 防烧屏 translate、点击/长按/触摸手势。
+   */
   @Builder
   cardCell(card: ScreensaverCardInstance, index: number) {
     Stack() {
+      // ---------- 底层：停用占位 或 真卡片 ----------
       if (!card.enabled) {
         Column({ space: 4 }) {
           Text(screenSaverCardTypeName(card.cardType))
@@ -855,12 +1114,15 @@ export struct ScreenSaverPlayPage {
           cardMode: this.editMode ? 'edit' : 'play',
           cardActive: this.pageActive && !this.editMode,
           onRequestConfig: (): void => {
+            // 卡片内部「点我配置」按钮 → 选中并打开对应设置面板
             this.selectCard(card.id);
             this.openSettingsForSelected();
           }
         })
       }
+      // ---------- 编辑层 ----------
       if (this.editMode) {
+        // 选中态：白色描边 + 右上角 × 删除角标（28vp 圆钮，40vp 热区）
         if (card.id === this.selectedCardId) {
           Column()
             .width('100%')
@@ -887,18 +1149,21 @@ export struct ScreenSaverPlayPage {
           .align(Alignment.TopEnd)
           .margin({ right: 2, top: 8 })
           .onTouch((event: TouchEvent): void => {
+            // 吃掉触摸，避免触发下面的卡片拖动
             event.stopPropagation();
           })
           .onClick((): void => {
             this.confirmRemoveCard(card.id);
           })
         }
+        // 拖动非法：整卡红边警示
         if (card.id === this.dragCardId && this.dragInvalid) {
           Column()
             .width('100%')
             .height('100%')
             .border({ width: 2, color: SCREEN_SAVER_COLORS.danger, radius: 8 })
         }
+        // 拉伸中：右上角实时尺寸标签
         if (card.id === this.resizeCardId && this.resizeLabel.length > 0) {
           Text(this.resizeLabel)
             .fontSize(12)
@@ -909,7 +1174,9 @@ export struct ScreenSaverPlayPage {
             .align(Alignment.TopEnd)
         }
       }
+      // ---------- 拉伸手柄（两层：透明热区 + 可见圆点） ----------
       if (this.editMode) {
+        // 热区层：接收触摸（40vp，好按）
         Column()
           .width(SCREEN_SAVER_METRICS.handleHitSize)
           .height(SCREEN_SAVER_METRICS.handleHitSize)
@@ -920,6 +1187,7 @@ export struct ScreenSaverPlayPage {
           .onTouch((event: TouchEvent): void => {
             this.onHandleTouch(card, event);
           })
+        // 视觉层：28vp 圆点（不响应触摸，纯显示）
         Column() {
           Column()
             .width(SCREEN_SAVER_METRICS.handleVisualSize)
@@ -939,20 +1207,28 @@ export struct ScreenSaverPlayPage {
     .height('100%')
     .borderRadius(8)
     .clip(true)
+    // 播放态：卡片自身 Transparent，触摸透传给整页（点击唤胶囊）；
+    // 编辑态：Default，卡片自己接触摸（拖动/选中）。
     .hitTestBehavior(this.editMode ? HitTestMode.Default : HitTestMode.Transparent)
+    // 编辑入场时整体缩到 0.96，营造「进入编辑」的层次感
     .scale({
       x: this.editMode && this.editProgress > 0 ? 0.96 : 1,
       y: this.editMode && this.editProgress > 0 ? 0.96 : 1
     })
+    // 拖动位移实时跟随手指
     .offset({
       x: card.id === this.dragCardId ? this.dragOffsetX : 0,
       y: card.id === this.dragCardId ? this.dragOffsetY : 0
     })
+    // 拖动中的卡片浮到最上层
     .zIndex(card.id === this.dragCardId ? 20 : index)
+    // 防烧屏位移（仅播放态的时钟卡片生效）
     .translate({
       x: this.burnInX(card),
       y: this.burnInY(card)
     })
+    // 编辑态点击逻辑：已选中→打开设置；未选中→选中；
+    // 播放态→当整页点击处理（唤胶囊）
     .onClick((): void => {
       if (this.editMode) {
         if (card.id === this.selectedCardId) {
@@ -964,6 +1240,7 @@ export struct ScreenSaverPlayPage {
         this.handleScreenTap();
       }
     })
+    // 播放态长按卡片也能进编辑（与整页长按互为补充）
     .gesture(
       LongPressGesture({ repeat: false, duration: SCREEN_SAVER_METRICS.longPressMs })
         .onAction((): void => {
@@ -973,24 +1250,41 @@ export struct ScreenSaverPlayPage {
           }
         })
     )
+    // 触摸交给拖动逻辑（编辑态才真正生效）
     .onTouch((event: TouchEvent): void => {
       this.onCellTouch(card, event);
     })
   }
 
+  /**
+   * 「单卡片居中」是否生效：
+   * 播放态 + 只有 1 张卡片 + 设置开关打开。
+   */
   private singleCardCenteredActive(): boolean {
     return !this.editMode && this.cards().length === 1 &&
       screenSaverAppModel.layout.settings.singleCardCentered;
   }
 
+  /**
+   * 网格列数：编辑态固定 4 列（编辑视图跨设备一致），播放态按断点。
+   */
   private gridColumns(): number {
     return this.editMode ? SCREEN_SAVER_GRID_COLS : this.columns;
   }
 
+  /**
+   * 网格行数：编辑态固定 8 行，播放态按断点。
+   */
   private gridRows(): number {
     return this.editMode ? SCREEN_SAVER_GRID_ROWS : this.rows;
   }
 
+  /**
+   * 播放态网格整体下移量（vp）：
+   * 卡片没占满网格时，把剩余的空行分一半到顶部——
+   * 让内容整体居于屏幕中部而不是贴顶。
+   * 编辑态/多卡片占满时不下移。
+   */
   private playCenterOffsetY(): number {
     if (this.editMode || this.gridH <= 0) {
       return 0;
@@ -1011,12 +1305,21 @@ export struct ScreenSaverPlayPage {
     return freeRows / 2 * (this.gridH / this.gridRows());
   }
 
+  /**
+   * 页面主体（Stack 分层）：
+   *   内容层：空态 / 单卡居中 / 标准网格（三选一）；
+   *   编辑层：网格线 + 顶栏底栏（仅编辑态）；
+   *   胶囊层：「退出屏保」（仅播放态胶囊可见时）。
+   * 根节点挂：长按进编辑、点击唤胶囊、整页透明度、bindSheet 设置面板。
+   */
   build() {
     NavDestination() {
       Stack({ alignContent: Alignment.Top }) {
+        // ---------- 内容层（三选一） ----------
         if (this.cards().length === 0) {
           this.emptyState()
         } else if (this.singleCardCenteredActive()) {
+          // 单卡片居中：脱离 Grid，直接按比例居中摆放
           Column() {
             Column() {
               this.cardCell(this.cards()[0], 0)
@@ -1029,6 +1332,7 @@ export struct ScreenSaverPlayPage {
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
         } else {
+          // 标准网格布局：GridItem 按 colStart/rowStart/colSpan/rowSpan 定位
           Column() {
             Grid() {
               ForEach(this.cards(), (card: ScreensaverCardInstance, index: number) => {
@@ -1044,12 +1348,15 @@ export struct ScreenSaverPlayPage {
             }
             .columnsTemplate(this.templateOf(this.gridColumns()))
             .rowsTemplate(this.templateOf(this.gridRows()))
+            // 宽屏编辑态网格限宽 480：编辑视图不至于铺满大屏
             .width(this.editMode && this.isWide ? SCREEN_SAVER_EDIT_MAX_WIDTH : '100%')
             .height('100%')
+            // 播放态内容整体下移（居中观感）
             .translate({ y: this.playCenterOffsetY() })
             .onClick((): void => {
               this.handleScreenTap();
             })
+            // 量出网格实际尺寸：拖动/拉伸的格子换算全靠它
             .onAreaChange((oldArea: Area, newArea: Area): void => {
               this.gridW = typeof newArea.width === 'number' ? newArea.width : 0;
               this.gridH = typeof newArea.height === 'number' ? newArea.height : 0;
@@ -1060,6 +1367,7 @@ export struct ScreenSaverPlayPage {
           .alignItems(HorizontalAlign.Center)
         }
 
+        // ---------- 编辑层：网格线 + 顶底栏 ----------
         if (this.editMode) {
           this.gridOverlay()
           Column() {
@@ -1072,6 +1380,7 @@ export struct ScreenSaverPlayPage {
           .hitTestBehavior(HitTestMode.None)
         }
 
+        // ---------- 胶囊层：退出屏保 ----------
         if (this.capsuleVisible && !this.editMode) {
           Column() {
             Text('退出屏保')
@@ -1094,6 +1403,7 @@ export struct ScreenSaverPlayPage {
       .width('100%')
       .height('100%')
       .backgroundColor(SCREEN_SAVER_COLORS.canvasBg)
+      // 整页长按：任意空白处也能进编辑模式
       .gesture(
         LongPressGesture({ repeat: false, duration: SCREEN_SAVER_METRICS.longPressMs })
           .onAction((): void => {
@@ -1105,7 +1415,9 @@ export struct ScreenSaverPlayPage {
       .onClick((): void => {
         this.handleScreenTap();
       })
+      // 进出场动画的透明度
       .opacity(this.displayOpacity)
+      // 设置面板（编辑态双击卡片弹出）
       .bindSheet(this.sheetVisible, this.sheetContent(), {
         height: 452,
         dragBar: true,
@@ -1118,6 +1430,12 @@ export struct ScreenSaverPlayPage {
     }
     .hideTitleBar(true)
     .backgroundColor(SCREEN_SAVER_COLORS.canvasBg)
+    /**
+     * 系统返回键：
+     * 编辑态 → 先退出编辑（保留改动）；
+     * 播放态 → 退出屏保。
+     * 两种情况都返回 true（拦截系统默认行为）。
+     */
     .onBackPressed((): boolean => {
       if (this.editMode) {
         this.exitEditMode(false);
