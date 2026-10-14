@@ -38,6 +38,17 @@ export type ClockFormat = 'timeDate' | 'timeOnly' | 'dateOnly' | 'lunar';
 export type PhotoOrder = 'shuffle' | 'time';
 /** Git 数据加载状态：未加载 / 加载中 / 成功 / 离线 / 失败。 */
 export type GitLoadState = 'idle' | 'loading' | 'success' | 'offline' | 'error';
+
+/**
+ * 天气类型（变更项 5）：把 WMO 天气代码归并成「装饰元素」需要的几类。
+ * 每一类在卡片上对应一组**静态**绘制的背景装饰（见 WeatherCardView）：
+ * clear 太阳 / partly 云+太阳 / cloudy 云 / overcast 厚云 / fog 雾线 /
+ * drizzle 细雨 / rain 雨 / freezing 冻雨 / snow 雪 / showers 阵雨 /
+ * thunder 云+闪电 / unknown 不画装饰（降级）。
+ * 归并规则见 WeatherViewModel.screenSaverWeatherConditionOf。
+ */
+export type ScreensaverWeatherCondition = 'clear' | 'partly' | 'cloudy' | 'overcast' | 'fog' | 'drizzle'
+  | 'rain' | 'freezing' | 'snow' | 'showers' | 'thunder' | 'unknown';
 /** 半模态面板种类：当前弹出的是哪个设置面板。 */
 export type SheetKind = 'none' | 'clock' | 'photo' | 'video' | 'git' | 'weather' | 'entry' | 'albumSource';
 
@@ -149,6 +160,20 @@ export interface ScreensaverSizePreset {
   label: string;
 }
 
+/**
+ * 缩放结果（变更项 2：设置面板通道的吸附/占用反馈）。
+ * ok=false 表示未能落库（重叠/越界/卡片不存在）；
+ * snapped=true 表示请求尺寸被吸附到最近的合法值；
+ * unchanged=true 表示最终跨度与操作前一致。
+ */
+export interface ScreensaverResizeResult {
+  ok: boolean;
+  snapped: boolean;
+  unchanged: boolean;
+  colSpan: number;
+  rowSpan: number;
+}
+
 /** 卡片在网格中的位置：起点 + 占用的行列跨度。 */
 export interface ScreensaverGridPos {
   colStart: number;
@@ -161,6 +186,50 @@ export interface ScreensaverGridPos {
 export interface ScreensaverGridSlot {
   colStart: number;
   rowStart: number;
+}
+
+// ---------- 屏保整体背景（变更项 7） ----------
+/** 背景预设色：色值 + 显示名（色值来自需求正文，无设计稿 guid）。 */
+export interface ScreensaverCanvasColorOption {
+  value: string;
+  label: string;
+}
+
+/** 默认背景：纯黑（OLED 省电基准，也是变更项 7 的要求）。 */
+export const SCREEN_SAVER_DEFAULT_CANVAS_COLOR: string = '#000000';
+
+/** 24 个预设背景色（需求正文给定，顺序与需求一致）。 */
+export const SCREEN_SAVER_CANVAS_COLORS: ScreensaverCanvasColorOption[] = [
+  { value: '#A3B5C0', label: '雾灰蓝' },
+  { value: '#9FB6C4', label: '浅钢蓝' },
+  { value: '#C6E2FF', label: '晴空蓝' },
+  { value: '#B8E0D2', label: '青瓷绿' },
+  { value: '#B2C2A5', label: '橄榄灰' },
+  { value: '#B5C9A8', label: '鼠尾草' },
+  { value: '#B5C4A1', label: '苔绿' },
+  { value: '#C9A9A6', label: '陶粉' },
+  { value: '#D8A7A7', label: '玫瑰灰' },
+  { value: '#D9C1C1', label: '藕粉' },
+  { value: '#F5C6A5', label: '蜜桃' },
+  { value: '#F2D5C4', label: '奶咖' },
+  { value: '#D4B8A8', label: '浅驼' },
+  { value: '#D6C6E1', label: '淡紫' },
+  { value: '#C8B6D9', label: '薰衣草' },
+  { value: '#B8A9C9', label: '藤紫' },
+  { value: '#A89BB9', label: '灰紫' },
+  { value: '#F7E7A3', label: '淡黄' },
+  { value: '#F7E8B5', label: '米黄' },
+  { value: '#F5F0E1', label: '象牙' },
+  { value: '#E8DCC8', label: '亚麻' },
+  { value: '#D5C7B8', label: '浅沙' },
+  { value: '#D9D9D9', label: '浅灰' },
+  { value: '#F7F7F5', label: '云白' }
+];
+
+/** 预设色里是否包含某个色值（读盘数据校验用）。 */
+export function screenSaverIsCanvasColor(value: string): boolean {
+  return SCREEN_SAVER_CANVAS_COLORS.some((option: ScreensaverCanvasColorOption): boolean =>
+  option.value === value);
 }
 
 /** 启动参数：标记从哪里进入屏保（统计/日志用）。 */
@@ -301,6 +370,10 @@ export class ScreensaverSettings {
   @Trace keepScreenOn: boolean = true;        // 保持屏幕常亮
   @Trace motionDisabled: boolean = false;     // 关闭所有动画
   @Trace lowBatteryAutoExit: boolean = true;  // 低电量自动退出屏保
+  // ---------- 屏保整体背景（变更项 7） ----------
+  @Trace canvasColor: string = '#000000';     // 背景色（默认纯黑；预设色见 CanvasBackground）
+  @Trace canvasImageUri: string = '';         // 自选背景图片（空 = 只用色值）
+  @Trace canvasBlur: boolean = false;         // 背景图片是否做一次性离屏模糊
 }
 
 /** 布局根节点：版本号 + 全局设置 + 卡片数组。整个持久化文件的内存形态。 */
@@ -381,6 +454,12 @@ export interface ScreensaverWeatherData {
   highC: number;
   lowC: number;
   fetchedAt: number;
+  // ---------- 变更项 5 扩展字段（旧缓存没有这些字段 → 读出来是默认值） ----------
+  humidityPercent: number;   // 相对湿度（%），-1 = 无数据
+  windKph: number;           // 风速（km/h），-1 = 无数据
+  tomorrowHighC: number;     // 明日最高温（℃），-999 = 无数据
+  tomorrowLowC: number;      // 明日最低温（℃），-999 = 无数据
+  tomorrowCode: number;      // 明日天气代码（WMO），-1 = 无数据
 }
 
 /** 天气离线缓存的原始结构。 */
@@ -391,6 +470,11 @@ export interface ScreensaverRawWeatherCache {
   highC?: number;
   lowC?: number;
   fetchedAt?: number;
+  humidityPercent?: number;
+  windKph?: number;
+  tomorrowHighC?: number;
+  tomorrowLowC?: number;
+  tomorrowCode?: number;
 }
 
 /** 单张卡片的原始结构。 */
@@ -424,6 +508,9 @@ export interface ScreensaverRawSettings {
   keepScreenOn?: boolean;
   motionDisabled?: boolean;
   lowBatteryAutoExit?: boolean;
+  canvasColor?: string;
+  canvasImageUri?: string;
+  canvasBlur?: boolean;
   dimEnabled?: boolean;
   dimDelaySec?: number;
   dimBrightness?: number;

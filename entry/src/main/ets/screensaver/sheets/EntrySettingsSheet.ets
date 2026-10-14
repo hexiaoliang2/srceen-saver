@@ -16,14 +16,17 @@ import { common } from '@kit.AbilityKit';
 import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
-  ScreenSaverSheetHeader
+  ScreenSaverSheetHeader,
+  ScreenSaverSizePresetRow,
+  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverOpenLink } from '../../common/AppLinkLauncher';
 import { screenSaverAppModel } from '../../model/AppModel';
 import { ScreensaverEntryCard } from '../../cards/EntryCardView';
-import { ScreensaverCardInstance } from '../../model/ConfigModels';
+import { screenSaverSizePresets } from '../../cards/CardCatalog';
+import { ScreensaverSizePreset, ScreensaverCardInstance } from '../../model/ConfigModels';
 
 @ComponentV2
 export struct ScreenSaverEntrySettingsPanel {
@@ -84,6 +87,19 @@ export struct ScreenSaverEntrySettingsPanel {
     }
     this.statusText = result.reason;
     this.toast(result.reason);
+  }
+
+  /**
+   * 应用尺寸预设（变更项 2 通道 A：设置面板可改尺寸）。
+   * 与编辑态拖拽缩放写的是同一份布局数据（card.colSpan/rowSpan），
+   * 因此两条通道天然双向同步。
+   */
+  private applySizePreset(preset: ScreensaverSizePreset): void {
+    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
+    const message = screenSaverResizeFeedbackText(outcome);
+    if (message.length > 0) {
+      this.toast(message);
+    }
   }
 
   build() {
@@ -205,10 +221,21 @@ export struct ScreenSaverEntrySettingsPanel {
 
           // ---------- 合规说明 ----------
           Text('本卡片只做跳转：不展示、不缓存第三方内容，也不内置任何第三方名称/图标/链接。' +
-            '请在编辑态点击卡片测试跳转；播放态为保持屏保纯净不响应点击。')
+            '图标为程序化绘制的中性图标（系统未向三方应用开放他人应用图标查询接口）；' +
+            '请在编辑态点击「打开」测试跳转；播放态点击即跳转、失败不打断屏保。')
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .width('100%')
+
+          // ---------- 尺寸（变更项 2 通道 A） ----------
+          ScreenSaverSizePresetRow({
+            presets: screenSaverSizePresets('entry'),
+            currentCols: this.card.colSpan,
+            currentRows: this.card.rowSpan,
+            onPick: (preset: ScreensaverSizePreset): void => {
+              this.applySizePreset(preset);
+            }
+          })
 
           ScreenSaverDeleteCardRow({
             onDelete: (): void => {

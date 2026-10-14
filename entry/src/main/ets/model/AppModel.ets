@@ -44,6 +44,8 @@ import {
   SCREEN_SAVER_GRID_ROWS,
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
   SCREEN_SAVER_SCHEMA_VERSION,
+  SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
+  screenSaverIsCanvasColor,
   ScreensaverCardInstance,
   ScreensaverCardMeta,
   ScreensaverCardType,
@@ -65,6 +67,7 @@ import {
   ScreensaverRawVideo,
   ScreensaverRawWeather,
   ScreensaverRawWeatherCache,
+  ScreensaverResizeResult,
   ScreensaverSettings,
   ScreensaverWeatherData
 } from './ConfigModels';
@@ -270,12 +273,17 @@ export class ScreensaverAppModel {
       description: data.description,
       highC: data.highC,
       lowC: data.lowC,
-      fetchedAt: data.fetchedAt
+      fetchedAt: data.fetchedAt,
+      humidityPercent: data.humidityPercent,
+      windKph: data.windKph,
+      tomorrowHighC: data.tomorrowHighC,
+      tomorrowLowC: data.tomorrowLowC,
+      tomorrowCode: data.tomorrowCode
     };
     void this.persistFlag(SCREEN_SAVER_WEATHER_CACHE_KEY, JSON.stringify(raw));
   }
 
-  /** 解析磁盘上的天气缓存 JSON；解析失败返回 undefined。 */
+  /** 解析磁盘上的天气缓存 JSON；解析失败返回 undefined。旧缓存缺扩展字段 → 取「无数据」哨兵值。 */
   private parseWeatherCache(text: string): ScreensaverWeatherData | undefined {
     try {
       const raw = JSON.parse(text) as ScreensaverRawWeatherCache;
@@ -285,7 +293,12 @@ export class ScreensaverAppModel {
         description: raw.description ?? '',
         highC: raw.highC ?? 0,
         lowC: raw.lowC ?? 0,
-        fetchedAt: raw.fetchedAt ?? 0
+        fetchedAt: raw.fetchedAt ?? 0,
+        humidityPercent: raw.humidityPercent ?? -1,
+        windKph: raw.windKph ?? -1,
+        tomorrowHighC: raw.tomorrowHighC ?? -999,
+        tomorrowLowC: raw.tomorrowLowC ?? -999,
+        tomorrowCode: raw.tomorrowCode ?? -1
       };
       return data;
     } catch (err) {
@@ -488,7 +501,54 @@ export class ScreensaverAppModel {
   }
 
   /**
-   * 缩放卡片到指定跨度。
+   * 缩放的完整结果（变更项 2 的「设置面板通道」反馈用）。
+   * ok=false 表示未能落库（与其它卡片重叠/越界/卡片不存在）；
+   * snapped=true 表示请求的跨度不在尺寸矩阵里、被吸附到了另一个合法值；
+   * unchanged=true 表示最终跨度与操作前一致（点的是当前尺寸，或被吸附回原尺寸）。
+   */
+  resizeCardToDetailed(cardId: string, colSpan: number, rowSpan: number): ScreensaverResizeResult {
+    const card = this.cardById(cardId);
+    if (card === undefined) {
+      const missing: ScreensaverResizeResult = {
+        ok: false,
+        snapped: false,
+        unchanged: true,
+        colSpan: 0,
+        rowSpan: 0
+      };
+      return missing;
+    }
+    const entry = screenSaverSnapCardSize(card.cardType, colSpan, rowSpan,
+      SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
+    const snapped = entry.colSpan !== colSpan || entry.rowSpan !== rowSpan;
+    const unchanged = entry.colSpan === card.colSpan && entry.rowSpan === card.rowSpan;
+    const outcome: ScreensaverResizeResult = {
+      ok: true,
+      snapped: snapped,
+      unchanged: unchanged,
+      colSpan: entry.colSpan,
+      rowSpan: entry.rowSpan
+    };
+    if (unchanged) {
+      return outcome;
+    }
+    if (card.floating) {
+      // 悬浮卡不占网格：只改跨度（决定悬浮卡的显示尺寸），不参与碰撞校验
+      card.colSpan = entry.colSpan;
+      card.rowSpan = entry.rowSpan;
+      this.save();
+      return outcome;
+    }
+    // 靠右/靠下的卡片放大后可能越界：把起点往回拉，保证不超出网格。
+    const nextColStart = Math.max(0, Math.min(card.colStart, SCREEN_SAVER_GRID_COLS - entry.colSpan));
+    const nextRowStart = Math.max(0, Math.min(card.rowStart, SCREEN_SAVER_GRID_ROWS - entry.rowSpan));
+    const placed = this.placeCard(cardId, nextColStart, nextRowStart, entry.colSpan, entry.rowSpan);
+    outcome.ok = placed;
+    return outcome;
+  }
+
+  /**
+   * 缩放卡片到指定跨度（布尔版，保留给「只关心成败」的调用方）。
    *
    * 与旧实现的关键区别：**非法尺寸会被吸附到最近的合法值**（见尺寸矩阵），
    * 而不是简单夹取上下限。例如时钟没有 3×3 这一档时，请求 3×3 会吸附到
@@ -496,26 +556,8 @@ export class ScreensaverAppModel {
    * 之后再保证不越出网格右下边界（必要时把起点左移/上移），最后尝试放置。
    */
   resizeCardTo(cardId: string, colSpan: number, rowSpan: number): boolean {
-    const card = this.cardById(cardId);
-    if (card === undefined) {
-      return false;
-    }
-    const entry = screenSaverSnapCardSize(card.cardType, colSpan, rowSpan,
-      SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
-    if (entry.colSpan === card.colSpan && entry.rowSpan === card.rowSpan) {
-      return false;
-    }
-    if (card.floating) {
-      // 悬浮卡不占网格：只改跨度（决定悬浮卡的显示尺寸），不参与碰撞校验
-      card.colSpan = entry.colSpan;
-      card.rowSpan = entry.rowSpan;
-      this.save();
-      return true;
-    }
-    // 靠右/靠下的卡片放大后可能越界：把起点往回拉，保证不超出网格。
-    const nextColStart = Math.max(0, Math.min(card.colStart, SCREEN_SAVER_GRID_COLS - entry.colSpan));
-    const nextRowStart = Math.max(0, Math.min(card.rowStart, SCREEN_SAVER_GRID_ROWS - entry.rowSpan));
-    return this.placeCard(cardId, nextColStart, nextRowStart, entry.colSpan, entry.rowSpan);
+    const outcome = this.resizeCardToDetailed(cardId, colSpan, rowSpan);
+    return outcome.ok && !outcome.unchanged;
   }
 
   /**
@@ -892,6 +934,15 @@ export class ScreensaverAppModel {
     settings.keepScreenOn = rawSettings.keepScreenOn ?? true;
     settings.motionDisabled = rawSettings.motionDisabled ?? false;
     settings.lowBatteryAutoExit = rawSettings.lowBatteryAutoExit ?? true;
+    // 屏保背景（变更项 7）：色值必须在预设白名单里（磁盘数据不可信），
+    // 图片 uri 只做长度校验，模糊开关取布尔。
+    const rawColor = rawSettings.canvasColor;
+    if (rawColor !== undefined && (screenSaverIsCanvasColor(rawColor) ||
+      rawColor === SCREEN_SAVER_DEFAULT_CANVAS_COLOR)) {
+      settings.canvasColor = rawColor;
+    }
+    settings.canvasImageUri = rawSettings.canvasImageUri ?? '';
+    settings.canvasBlur = rawSettings.canvasBlur ?? false;
   }
 
   /**
@@ -1140,7 +1191,10 @@ export class ScreensaverAppModel {
       videoDefaultAutoplay: settings.videoDefaultAutoplay,
       keepScreenOn: settings.keepScreenOn,
       motionDisabled: settings.motionDisabled,
-      lowBatteryAutoExit: settings.lowBatteryAutoExit
+      lowBatteryAutoExit: settings.lowBatteryAutoExit,
+      canvasColor: settings.canvasColor,
+      canvasImageUri: settings.canvasImageUri,
+      canvasBlur: settings.canvasBlur
     };
     const rawLayout: ScreensaverRawLayout = {
       schemaVersion: SCREEN_SAVER_SCHEMA_VERSION,

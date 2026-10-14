@@ -17,14 +17,17 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverToggleRow
+  ScreenSaverSizePresetRow,
+  ScreenSaverToggleRow,
+  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
 import { screenSaverWeatherViewModel } from '../../model/WeatherViewModel';
 import { ScreensaverWeatherCard } from '../../cards/WeatherCardView';
-import { ScreensaverCardInstance } from '../../model/ConfigModels';
+import { screenSaverSizePresets } from '../../cards/CardCatalog';
+import { ScreensaverSizePreset, ScreensaverCardInstance } from '../../model/ConfigModels';
 
 @ComponentV2
 export struct ScreenSaverWeatherSettingsPanel {
@@ -81,6 +84,18 @@ export struct ScreenSaverWeatherSettingsPanel {
     } catch (err) {
       const error = err as Error;
       ScreenSaverLogger.warn(`toast failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * 应用尺寸预设（变更项 2 通道 A + 变更项 5：天气卡片纳入尺寸矩阵）。
+   * 与编辑态拖拽缩放共用同一份布局数据，双向同步。
+   */
+  private applySizePreset(preset: ScreensaverSizePreset): void {
+    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
+    const message = screenSaverResizeFeedbackText(outcome);
+    if (message.length > 0) {
+      this.toast(message);
     }
   }
 
@@ -205,6 +220,17 @@ export struct ScreenSaverWeatherSettingsPanel {
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .width('100%')
+
+          // ---------- 尺寸（变更项 2 / 变更项 5） ----------
+          // 天气卡片纳入尺寸矩阵：小尺寸只显示图标 + 温度，大尺寸增加城市/湿度/风力/明日趋势。
+          ScreenSaverSizePresetRow({
+            presets: screenSaverSizePresets('weather'),
+            currentCols: this.card.colSpan,
+            currentRows: this.card.rowSpan,
+            onPick: (preset: ScreensaverSizePreset): void => {
+              this.applySizePreset(preset);
+            }
+          })
 
           ScreenSaverDeleteCardRow({
             onDelete: (): void => {

@@ -28,7 +28,6 @@ import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverVideoThumb } from '../common/VideoThumb';
 import { screenSaverResolveDensity } from './CardCatalog';
-import { SCREEN_SAVER_COLORS } from '../common/ScreenSaverStyle';
 import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
 
 @ComponentV2
@@ -198,47 +197,63 @@ export struct ScreensaverVideoCard {
 
   /**
    * 界面结构（Stack 分层）——变更项 3 之后不再有任何常驻控件层：
-   *   1. Video 组件（有视频且可用时）：关闭控制条/自动播放，不播放时显示封面帧；
-   *      objectFit=Contain → 画面等比完整显示，不裁切，比例不一致时露黑边（同变更项 4）；
+   *   1. 视频画面（有视频且可用时）：
+   *      · **不播放**时用 Image 显示封面帧（objectFit=Contain）——Image 的 letterbox
+   *        区域天然透明，比例不一致时露出屏保整体背景（变更项 4）；
+   *        之前用 Video 组件的 previewUri 承担这件事，但原生视频 surface 的
+   *        letterbox 是不透明黑边，无法满足「黑边全透明」，因此拆开；
+   *      · **播放**时挂载 Video 组件（objectFit=Contain）。
    *   2. 「未选择视频」占位（极简档压成一行小字，避免 1×1 里文字溢出）；
    *   3. 「视频不可用」占位（含编辑态「重选」按钮，仅完整档显示按钮）。
    *
    * 已移除：卡片正中的播放/停止按钮与半透明遮罩层（原「▶/❚❚」角标）。
    * 播放入口改为：屏保展示态单击卡片（ScreensaverPage 统一分发）；
    * 编辑态/面板预览用设置面板里的「播放视频」开关。
+   *
+   * 播放中视频由原生播放器做 letterbox：其黑边属于播放器画面的一部分
+   * （应用侧无法把它改成透明），这是系统组件行为，已在交付文档中如实标注。
    */
   build() {
     Stack() {
       if (this.card.video.uri.length > 0 && !this.unavailable) {
-        Video({
-          src: this.card.video.uri,
-          // previewUri：播放前的预览图（封面帧缓存，需 file:// 前缀），不播放时看到的就是它
-          previewUri: this.coverUri().length > 0 ? this.coverUri() : undefined,
-          controller: this.controller
-        })
-          .autoPlay(false)   // 永不自动播放，由 syncPlayback 统一控制
-          .controls(false)   // 屏保上不要系统控制条
-          .loop(this.card.video.loop)
-          .muted(this.card.video.muted)
-          .objectFit(ImageFit.Contain)
-          .width('100%')
-          .height('100%')
-          .onPrepared((): void => {
-            // 播放器就绪后才能 start；如果开关已经打开，这里立即开始播
-            ScreenSaverLogger.info('video component prepared');
-            this.prepared = true;
-            this.syncPlayback();
+        if (!this.card.video.playing && this.coverUri().length > 0) {
+          // 静态态：封面帧用 Image 显示（letterbox 透明）
+          Image(this.coverUri())
+            .objectFit(ImageFit.Contain)
+            .width('100%')
+            .height('100%')
+        } else {
+          Video({
+            src: this.card.video.uri,
+            // previewUri：播放器就绪前的预览图（封面帧缓存，需 file:// 前缀）
+            previewUri: this.coverUri().length > 0 ? this.coverUri() : undefined,
+            controller: this.controller
           })
-          .onFinish((): void => {
-            // 播完（未开循环）：开关复位，回到封面帧状态
-            if (!this.card.video.loop) {
-              this.card.video.playing = false;
-            }
-          })
-          .onError((): void => {
-            ScreenSaverLogger.warn('video component error');
-            this.prepared = false;
-          })
+            .autoPlay(false)   // 永不自动播放，由 syncPlayback 统一控制
+            .controls(false)   // 屏保上不要系统控制条
+            .loop(this.card.video.loop)
+            .muted(this.card.video.muted)
+            .objectFit(ImageFit.Contain)
+            .width('100%')
+            .height('100%')
+            .backgroundColor(Color.Transparent)
+            .onPrepared((): void => {
+              // 播放器就绪后才能 start；如果开关已经打开，这里立即开始播
+              ScreenSaverLogger.info('video component prepared');
+              this.prepared = true;
+              this.syncPlayback();
+            })
+            .onFinish((): void => {
+              // 播完（未开循环）：开关复位，回到封面帧状态
+              if (!this.card.video.loop) {
+                this.card.video.playing = false;
+              }
+            })
+            .onError((): void => {
+              ScreenSaverLogger.warn('video component error');
+              this.prepared = false;
+            })
+        }
       }
       if (this.emptyVisible) {
         if (this.density() === 'minimal') {
@@ -297,6 +312,8 @@ export struct ScreensaverVideoCard {
     .width('100%')
     .height('100%')
     .clip(true)
-    .backgroundColor(SCREEN_SAVER_COLORS.cardSurface)
+    // 变更项 4：卡片自身底色透明——视频按 Contain 播放/显示封面帧时，
+    // 比例不一致产生的 letterbox 区域完全透明，露出屏保整体背景（不再是黑色块）。
+    .backgroundColor(Color.Transparent)
   }
 }

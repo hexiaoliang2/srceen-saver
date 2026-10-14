@@ -42,6 +42,7 @@
 
 import { mediaquery } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { image } from '@kit.ImageKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverWindowController } from '../common/WindowController';
@@ -52,6 +53,17 @@ import { ScreensaverCardHost } from '../cards/CardHost';
 import { screenSaverAppModel } from '../model/AppModel';
 import { screenSaverGitViewModel } from '../model/GitViewModel';
 import { SCREEN_SAVER_COLORS, SCREEN_SAVER_METRICS } from '../common/ScreenSaverStyle';
+import { screenSaverCanvasBackground } from '../common/CanvasBackground';
+import {
+  screenSaverGridMetrics,
+  screenSaverRectOf,
+  screenSaverSpanFromOffset,
+  screenSaverCellDelta,
+  screenSaverCenteredRowOffset,
+  screenSaverRowOffsetToVp,
+  ScreenSaverGridMetrics,
+  ScreenSaverSpan
+} from '../common/GridLayout';
 import {
   screenSaverMotionDuration,
   screenSaverSnapDuration,
@@ -78,10 +90,10 @@ import { ScreenSaverGitSettingsPanel } from './sheets/GitSettingsSheet';
 import { ScreenSaverWeatherSettingsPanel } from './sheets/WeatherSettingsSheet';
 import { ScreenSaverEntrySettingsPanel } from './sheets/EntrySettingsSheet';
 import {
+  SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
   SCREEN_SAVER_GRID_COLS,
   SCREEN_SAVER_GRID_ROWS,
   SheetKind,
-  ScreensaverCardDensity,
   ScreensaverCardInstance,
   ScreensaverGridPos
 } from '../model/ConfigModels';
@@ -215,6 +227,14 @@ export struct ScreenSaverPlayPage {
   @Local burnInShiftX: number = 0;
   /** 防烧屏当前 Y 偏移（vp）。 */
   @Local burnInShiftY: number = 0;
+  // ============ 屏保整体背景（变更项 7） ============
+  /**
+   * 背景图片的（模糊）位图。由 screenSaverCanvasBackground 离屏一次计算后缓存，
+   * 这里只持有引用用于渲染——页面重绘/卡片切换都不会触发重新计算。
+   */
+  @Local canvasPixel: image.PixelMap | undefined = undefined;
+  /** 已加载的背景键（uri|blurRadius），用于避免重复触发加载。 */
+  @Local canvasPixelKey: string = '';
 
   // ============ 悬浮卡拖动状态（需求 B） ============
   /** 正在拖动的悬浮卡 id（'' = 没在拖）。 */
@@ -308,8 +328,44 @@ export struct ScreenSaverPlayPage {
       });
     }
     screenSaverGitViewModel.hydrateFromCache();
+    this.refreshCanvasBackground();
     this.startBurnInTimer();
     this.startBatteryWatch();
+  }
+
+  /**
+   * 加载/刷新屏保整体背景图片（变更项 7）。
+   *
+   * 性能约束：模糊是**离屏一次性计算**（screenSaverCanvasBackground 内部缓存），
+   * 这里只在「图片/模糊开关的键变化」时才触发；键不变时直接复用已缓存的位图，
+   * 卡片切换、进出编辑态、回前台都不会重算。
+   */
+  private refreshCanvasBackground(): void {
+    const settings = screenSaverAppModel.layout.settings;
+    const uri = settings.canvasImageUri;
+    if (uri.length === 0) {
+      this.canvasPixel = undefined;
+      this.canvasPixelKey = '';
+      screenSaverCanvasBackground.clear();
+      return;
+    }
+    const key = `${uri}|${settings.canvasBlur ? 'blur' : 'plain'}`;
+    if (key === this.canvasPixelKey && this.canvasPixel !== undefined) {
+      return;
+    }
+    this.canvasPixelKey = key;
+    screenSaverCanvasBackground.ensure(uri, settings.canvasBlur).then((pixel: image.PixelMap | undefined): void => {
+      this.canvasPixel = pixel;
+      ScreenSaverLogger.info(`canvas background applied: uri=${uri} blurred=${settings.canvasBlur}`);
+    });
+  }
+
+  /** 回前台时补一次背景校验（设置在别处被改过时也能生效）。 */
+  @Monitor('pageActive')
+  onPageActiveChanged(): void {
+    if (this.pageActive) {
+      this.refreshCanvasBackground();
+    }
   }
 
   /**
@@ -424,8 +480,11 @@ export struct ScreenSaverPlayPage {
    * 拖动中用临时位移叠加，松手才写回模型（避免每帧落盘）。
    */
   private floatRect(card: ScreensaverCardInstance): ScreensaverFloatRect {
-    const width = this.gridW > 0 ? this.gridW * card.colSpan / SCREEN_SAVER_GRID_COLS : 100;
-    const height = this.gridH > 0 ? this.gridH * card.rowSpan / SCREEN_SAVER_GRID_ROWS : 100;
+    // 悬浮卡按手机网格（4×8）的跨度换算显示尺寸；位置用 floatX/floatY 并夹进画布。
+    const metrics = this.gridMetrics();
+    const size = screenSaverRectOf(0, 0, card.colSpan, card.rowSpan, metrics);
+    const width = this.gridW > 0 ? size.width : 100;
+    const height = this.gridH > 0 ? size.height : 100;
     const maxX = Math.max(0, this.gridW - width);
     const maxY = Math.max(0, this.gridH - height);
     const dragX = this.floatDragCardId === card.id ? this.floatDragOffsetX : 0;
@@ -450,8 +509,10 @@ export struct ScreenSaverPlayPage {
     if (touch === undefined) {
       return;
     }
-    const x = px2vp(touch.windowX);
-    const y = px2vp(touch.windowY);
+    // 变更项 3：TouchObject.windowX/windowY 的官方单位就是 **vp**（不是 px），
+    // 不能再做 px2vp 转换——否则位移会被压缩成 1/屏幕密度，拖动几乎不动。
+    const x = touch.windowX;
+    const y = touch.windowY;
     if (event.type === TouchType.Down) {
       if (card.floatLocked) {
         this.toast('位置已锁定：可在「卡片设置」里解锁');
@@ -741,23 +802,26 @@ export struct ScreenSaverPlayPage {
 
   /**
    * 屏保态点跳转卡：按卡片里用户填写的链接发起跳转（与编辑态「打开」按钮
-   * 共用同一个 AppLinkLauncher 实现）。失败给出降级文案。
+   * 共用同一个 AppLinkLauncher 实现）。
+   *
+   * 变更项 6：屏保展示态**不弹失败提示**（未安装目标应用 / 链接不可用都只记日志），
+   * 保持屏保态的纯净规则；编辑态的操作反馈由卡片内「打开」按钮负责。
    */
   private jumpFromEntryCard(card: ScreensaverCardInstance): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined) {
-      this.toast('无法获取应用上下文');
+      ScreenSaverLogger.warn('play-mode entry tap: no ability context');
       return;
     }
-    const link = card.entry.link;
-    if (link.trim().length === 0) {
-      this.toast('未配置链接：请先在卡片设置里填写');
+    const link = card.entry.link.trim();
+    if (link.length === 0) {
+      ScreenSaverLogger.info('play-mode entry tap: link not configured');
       return;
     }
     ScreenSaverLogger.info(`play-mode entry tap: ${link}`);
     screenSaverOpenLink(context, link).then((result: ScreenSaverLinkResult): void => {
       if (!result.ok) {
-        this.toast(result.reason);
+        ScreenSaverLogger.warn(`play-mode entry open failed: ${result.reason}`);
       }
     });
   }
@@ -916,16 +980,13 @@ export struct ScreenSaverPlayPage {
 
   /**
    * 把手指位移（vp）换算成目标格子坐标：
-   * 位移 ÷ 单元格尺寸 = 格子增量（四舍五入到最近的格），
-   * 再 clamp 到网格边界内。
+   * 位移 ÷ 单元格尺寸 = 格子增量（四舍五入到最近的格），再 clamp 到网格边界内。
+   * 换算统一走 common/GridLayout（变更项 1：编辑态与屏保态共用同一套坐标基准）。
    */
   private targetSlot(card: ScreensaverCardInstance, offsetX: number, offsetY: number): ScreensaverGridPos {
-    const cellWidth = this.gridW / SCREEN_SAVER_GRID_COLS;
-    const cellHeight = this.cellHeight();
-    const deltaCol = Math.round(offsetX / cellWidth);
-    const deltaRow = Math.round(offsetY / cellHeight);
-    let colStart = card.colStart + deltaCol;
-    let rowStart = card.rowStart + deltaRow;
+    const delta = screenSaverCellDelta(offsetX, offsetY, this.gridMetrics());
+    let colStart = card.colStart + delta.colSpan;
+    let rowStart = card.rowStart + delta.rowSpan;
     colStart = Math.max(0, Math.min(colStart, SCREEN_SAVER_GRID_COLS - card.colSpan));
     rowStart = Math.max(0, Math.min(rowStart, SCREEN_SAVER_GRID_ROWS - card.rowSpan));
     const pos: ScreensaverGridPos = {
@@ -1007,12 +1068,13 @@ export struct ScreenSaverPlayPage {
     this.dragOffsetY = 0;
   }
 
-  /** 单元格高度（vp）；网格还没量出来时返回 1 防止除零。 */
-  private cellHeight(): number {
-    if (this.gridH <= 0) {
-      return 1;
-    }
-    return this.gridH / SCREEN_SAVER_GRID_ROWS;
+  /**
+   * 编辑态与屏保态的**统一网格度量**（变更项 1 的坐标基准）：
+   * 单元格尺寸 = 画布宽高 / 4×8 网格。拖动、缩放、悬浮、背景全都用它，
+   * 不再有「某个状态用另一套偏移」的情况。
+   */
+  private gridMetrics(): ScreenSaverGridMetrics {
+    return screenSaverGridMetrics(this.gridW, this.gridH, SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
   }
 
   // ==================== 拉伸（改尺寸）====================
@@ -1053,30 +1115,25 @@ export struct ScreenSaverPlayPage {
     if (card === undefined || target === undefined) {
       return;
     }
-    const wantedCols = this.wantedSpanCols(offsetX);
-    const wantedRows = this.wantedSpanRows(offsetY);
-    this.resizeSnapped = target.colSpan !== wantedCols || target.rowSpan !== wantedRows;
+    const wanted = this.wantedSpan(offsetX, offsetY);
+    this.resizeSnapped = target.colSpan !== wanted.colSpan || target.rowSpan !== wanted.rowSpan;
     this.resizeInvalid = !screenSaverAppModel.previewCardRect(cardId, target.colStart, target.rowStart,
       target.colSpan, target.rowSpan);
     this.resizeLabel = this.resizeSnapped ?
-      `${wantedCols}×${wantedRows} → ${target.colSpan}×${target.rowSpan} 已吸附` :
+      `${wanted.colSpan}×${wanted.rowSpan} → ${target.colSpan}×${target.rowSpan} 已吸附` :
       `${target.colSpan}×${target.rowSpan}`;
   }
 
   /**
-   * 手指位移换算出的「用户想要的列跨度」（未吸附）。
+   * 手指位移换算出的「用户想要的跨度」（未吸附）。
    * 基准是**拖动前的跨度**（resizeOrigin*），不是卡片当前的跨度：
    * 预览会实时改写卡片跨度，若以当前值为基准，每一次 Move 都会在上一次
    * 结果上再叠加一次位移，尺寸会失控放大。
+   * 换算统一走 common/GridLayout（与拖动共用同一套「位移 → 格子」逻辑）。
    */
-  private wantedSpanCols(offsetX: number): number {
-    const cellWidth = this.gridW > 0 ? this.gridW / SCREEN_SAVER_GRID_COLS : 1;
-    return Math.max(1, this.resizeOriginColSpan + Math.round(offsetX / cellWidth));
-  }
-
-  /** 手指位移换算出的「用户想要的行跨度」（未吸附，基准同 wantedSpanCols）。 */
-  private wantedSpanRows(offsetY: number): number {
-    return Math.max(1, this.resizeOriginRowSpan + Math.round(offsetY / this.cellHeight()));
+  private wantedSpan(offsetX: number, offsetY: number): ScreenSaverSpan {
+    return screenSaverSpanFromOffset(this.resizeOriginColSpan, this.resizeOriginRowSpan, offsetX, offsetY,
+      this.gridMetrics());
   }
 
   /**
@@ -1091,9 +1148,8 @@ export struct ScreenSaverPlayPage {
     if (card === undefined || this.gridW <= 0) {
       return undefined;
     }
-    const wantedCols = this.wantedSpanCols(offsetX);
-    const wantedRows = this.wantedSpanRows(offsetY);
-    const entry = screenSaverSnapCardSize(card.cardType, wantedCols, wantedRows,
+    const wanted = this.wantedSpan(offsetX, offsetY);
+    const entry = screenSaverSnapCardSize(card.cardType, wanted.colSpan, wanted.rowSpan,
       SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
     const colStart = Math.max(0, Math.min(this.resizeOriginColStart, SCREEN_SAVER_GRID_COLS - entry.colSpan));
     const rowStart = Math.max(0, Math.min(this.resizeOriginRowStart, SCREEN_SAVER_GRID_ROWS - entry.rowSpan));
@@ -1134,6 +1190,12 @@ export struct ScreenSaverPlayPage {
       ScreenSaverLogger.info('resize commit: no target');
       return;
     }
+    // 关键诊断日志（变更项 3 的回归证据）：把位移、期望跨度、吸附结果一起记下来，
+    // 这样「手势是否到达缩放逻辑 / 位移是否被错误换算」都能从日志直接判读。
+    const wanted = this.wantedSpan(offsetX, offsetY);
+    ScreenSaverLogger.info(`resize commit: ${cardId} offset=${Math.round(offsetX)},${Math.round(offsetY)} ` +
+      `wanted=${wanted.colSpan}x${wanted.rowSpan} target=${target.colSpan}x${target.rowSpan} snapped=${snapped} ` +
+      `invalid=${invalid}`);
     if (invalid) {
       screenSaverAppModel.endCardRectPreview(cardId, originColStart, originRowStart, originColSpan, originRowSpan,
         false);
@@ -1191,9 +1253,10 @@ export struct ScreenSaverPlayPage {
     if (touch === undefined) {
       return;
     }
-    // px2vp：物理像素转视觉像素（手势计算统一用 vp）
-    const x = px2vp(touch.windowX);
-    const y = px2vp(touch.windowY);
+    // vp 坐标直接用（TouchObject.windowX/windowY 官方单位 = vp，见触摸事件文档）；
+    // 旧实现多做了 px2vp，把位移压缩了约 1/屏幕密度，导致「拖了却几乎不动」。
+    const x = touch.windowX;
+    const y = touch.windowY;
     if (event.type === TouchType.Down) {
       this.pendingTouchCardId = card.id;
       this.touchStartX = x;
@@ -1242,8 +1305,9 @@ export struct ScreenSaverPlayPage {
     if (touch === undefined) {
       return;
     }
-    const x = px2vp(touch.windowX);
-    const y = px2vp(touch.windowY);
+    // 单位同 onCellTouch：windowX/windowY 已是 vp，直接使用（变更项 3 的根因修复）。
+    const x = touch.windowX;
+    const y = touch.windowY;
     if (event.type === TouchType.Down) {
       this.resizeTouchStartX = x;
       this.resizeTouchStartY = y;
@@ -1300,6 +1364,7 @@ export struct ScreenSaverPlayPage {
   /**
    * 编辑态网格线覆盖层：4×8 半透明描边格子。
    * hitTestBehavior(None)：纯装饰，不拦截任何触摸。
+   * 与卡片层共用同一个垂直偏移（gridOffsetY），保证网格线和卡片永远对齐。
    */
   @Builder
   gridOverlay() {
@@ -1323,6 +1388,7 @@ export struct ScreenSaverPlayPage {
     .width('100%')
     .height('100%')
     .opacity(0.6)
+    .translate({ y: this.gridOffsetY() })
     .hitTestBehavior(HitTestMode.None)
   }
 
@@ -1505,12 +1571,20 @@ export struct ScreenSaverPlayPage {
    * 防烧屏 translate、点击/长按/触摸手势。
    */
   /**
-   * 该卡片是否需要「卡面 + 描边」（变更项 1）：
-   * 时钟卡返回 false —— 它是纯文字浮层，背景完全透明，
-   * 悬浮在其他卡片之上时不遮挡、不改变下方卡片的位置与显示。
-   * 其余卡片仍用统一卡面（缺陷 2 的静态对比方案）。
+   * 该卡片是否需要「卡面填充」（变更项 1 / 变更项 4）：
+   *   · 时钟卡返回 false —— 纯文字浮层，背景完全透明；
+   *   · 相册 / 视频卡返回 false —— 变更项 4 要求 letterbox 区域**全透明**，
+   *     露出的必须是屏保整体背景；如果卡片自己有一层近乎黑的卡面
+   *     （旧 cardSurface #0D0D10），透明黑边就会被这层卡面「接住」而看起来仍是黑边。
+   *   · 其余卡片（Git/天气/入口）仍用统一卡面。
+   * 描边与填充解耦：相册/视频仍保留 1vp 细描边（边界可辨），只有时钟两者都不要。
    */
-  private cardHasSurface(card: ScreensaverCardInstance): boolean {
+  private cardHasFill(card: ScreensaverCardInstance): boolean {
+    return card.cardType !== 'clock' && card.cardType !== 'photo' && card.cardType !== 'video';
+  }
+
+  /** 该卡片是否需要 1vp 细描边：除时钟（全透明浮层）外都保留。 */
+  private cardHasBorder(card: ScreensaverCardInstance): boolean {
     return card.cardType !== 'clock';
   }
 
@@ -1664,12 +1738,12 @@ export struct ScreenSaverPlayPage {
     .width('100%')
     .height('100%')
     // 卡面与描边：除时钟卡外统一「卡面 + 细描边 + 圆角」（缺陷 2 的静态对比方案）。
-    // 时钟卡按变更项 1 改为**全透明纯文字浮层**：没有底色、没有边框、没有遮罩，
-    // 悬浮到其他卡片之上时不会像一块面板那样盖住下方内容（不改变别人的布局与显示）。
+    // 时钟卡为全透明纯文字浮层（变更项 1）；
+    // 相册/视频卡不填卡面（变更项 4：letterbox 全透明露出整体背景），但保留细描边。
     .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
-    .backgroundColor(this.cardHasSurface(card) ? SCREEN_SAVER_COLORS.cardSurface : Color.Transparent)
+    .backgroundColor(this.cardHasFill(card) ? SCREEN_SAVER_COLORS.cardSurface : Color.Transparent)
     .border({
-      width: this.cardHasSurface(card) ? 1 : 0,
+      width: this.cardHasBorder(card) ? 1 : 0,
       color: SCREEN_SAVER_COLORS.cardHairline,
       radius: SCREEN_SAVER_METRICS.cardRadius
     })
@@ -1728,13 +1802,42 @@ export struct ScreenSaverPlayPage {
   }
 
   /**
-   * 「单卡片居中」是否生效：
-   * 播放态 + 只有 1 张卡片 + 设置开关打开。
+   * 「单卡片垂直居中」（全局设置 singleCardCentered）是否生效：
+   * 只有 1 张网格卡片、没有悬浮卡时才生效。
+   * 注意：**编辑态与屏保展示态用同一判据**（不再按模式区分），
+   * 这是变更项 1 的关键——旧实现只在屏保展示态下移，导致进入屏保后卡片整体位移。
    */
   private singleCardCenteredActive(): boolean {
-    return !this.editMode && this.gridEntries().length === 1 &&
+    return this.gridEntries().length === 1 &&
       this.floatingEntries().length === 0 &&
       screenSaverAppModel.layout.settings.singleCardCentered;
+  }
+
+  /**
+   * 内容层垂直偏移（vp）——**全页面唯一的一处位移策略**（变更项 1 修复点）。
+   *
+   * 历史问题：旧实现给屏保展示态的网格单独加了「剩余空行折半下移」的
+   * translate（playCenterOffsetY），编辑态恒为 0，悬浮层又是第三套坐标，
+   * 于是「进入屏保后网格卡片整体下移、悬浮时钟不动」。
+   *
+   * 现在：默认偏移恒为 0（卡片位置 = 网格坐标 × 单元格尺寸，与模式无关）；
+   * 只有用户显式打开「单卡片垂直居中」且布局确实只有一张卡时，才按
+   * 剩余空行折半下移——这个偏移**编辑态与屏保态完全一致**，
+   * 因此进出编辑态不会产生任何位移。
+   */
+  private gridOffsetY(): number {
+    if (!this.singleCardCenteredActive() || this.gridH <= 0) {
+      return 0;
+    }
+    const card = this.gridEntries()[0].card;
+    let usedRows = card.rowStart + card.rowSpan;
+    if (this.resizeCardId === card.id) {
+      // 拉伸预览期间卡片跨度在变：用拖动前的行数作为基准，
+      // 避免「调尺寸时整块画布跟着上下跳」。
+      usedRows = this.resizeOriginRowStart + this.resizeOriginRowSpan;
+    }
+    const rowOffset = screenSaverCenteredRowOffset(0, usedRows, this.gridRows());
+    return screenSaverRowOffsetToVp(rowOffset, this.gridMetrics());
   }
 
   /**
@@ -1752,35 +1855,45 @@ export struct ScreenSaverPlayPage {
   }
 
   /**
-   * 播放态网格整体下移量（vp）：
-   * 卡片没占满网格时，把剩余的空行分一半到顶部——
-   * 让内容整体居于屏幕中部而不是贴顶。
-   * 编辑态/多卡片占满时不下移。
+   * 屏保整体背景层（变更项 7）：
+   *   1. 色值：直接铺一层纯色（默认纯黑）；
+   *   2. 图片：用户自选图片的**离屏模糊结果**（已缓存），Cover 铺满；
+   * 它永远是 Stack 的第一个子节点（最底层），不参与任何卡片定位，
+   * 因此切换背景不会引起卡片重排或位移；也不拦截触摸（HitTestMode.None），
+   * 保证「点空白唤出退出胶囊」的手势不被背景层吃掉。
    */
-  private playCenterOffsetY(): number {
-    if (this.editMode || this.gridH <= 0) {
-      return 0;
+  @Builder
+  backgroundLayer() {
+    Stack() {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.canvasColor())
+        .hitTestBehavior(HitTestMode.None)
+      if (this.canvasPixel !== undefined) {
+        Image(this.canvasPixel)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+          .hitTestBehavior(HitTestMode.None)
+      }
     }
-    // 只按网格卡计算占用行数：悬浮卡不占格（需求 B）
-    const entries = this.gridEntries();
-    if (entries.length <= 1) {
-      return 0;
-    }
-    let usedRows = 0;
-    for (const entry of entries) {
-      const pos = this.positionOf(entry.index, entry.card);
-      usedRows = Math.max(usedRows, pos.rowStart + pos.rowSpan);
-    }
-    const freeRows = this.gridRows() - usedRows;
-    if (freeRows <= 0) {
-      return 0;
-    }
-    return freeRows / 2 * (this.gridH / this.gridRows());
+    .width('100%')
+    .height('100%')
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  /** 背景色：设置里的值；未设置时退回默认纯黑。 */
+  private canvasColor(): string {
+    const color = screenSaverAppModel.layout.settings.canvasColor;
+    return color.length > 0 ? color : SCREEN_SAVER_DEFAULT_CANVAS_COLOR;
   }
 
   /**
    * 页面主体（Stack 分层）：
-   *   内容层：空态 / 单卡居中 / 标准网格（三选一）；
+   *   背景层：屏保整体背景（变更项 7，永远在最底层，不参与卡片定位）；
+   *   内容层：空态 / 标准网格（卡片按网格坐标渲染，编辑态与屏保态同一坐标基准）；
+   *   悬浮层：悬浮卡片（不占网格，绝对定位）；
    *   编辑层：网格线 + 顶栏底栏（仅编辑态）；
    *   胶囊层：「退出屏保」（仅播放态胶囊可见时）。
    * 根节点挂：长按进编辑、点击唤胶囊、整页透明度、bindSheet 设置面板。
@@ -1788,25 +1901,17 @@ export struct ScreenSaverPlayPage {
   build() {
     NavDestination() {
       Stack({ alignContent: Alignment.Top }) {
-        // ---------- 内容层（三选一，外层负责进场缩放） ----------
+        // ---------- 背景层（变更项 7）：整体背景永远在卡片与悬浮时钟之下 ----------
+        this.backgroundLayer()
+
+        // ---------- 内容层（外层负责进场缩放） ----------
         Column() {
           if (this.cards().length === 0) {
             this.emptyState()
-          } else if (this.singleCardCenteredActive()) {
-            // 单卡片居中：脱离 Grid，直接按比例居中摆放
-            Column() {
-              Column() {
-                this.cardCell(this.cards()[0], 0, true)
-              }
-              .width(`${Math.min(100, this.cards()[0].colSpan / SCREEN_SAVER_GRID_COLS * 100)}%`)
-              .height(`${Math.min(100, this.cards()[0].rowSpan / SCREEN_SAVER_GRID_ROWS * 100)}%`)
-            }
-            .width('100%')
-            .height('100%')
-            .justifyContent(FlexAlign.Center)
-            .alignItems(HorizontalAlign.Center)
           } else {
-            // 标准网格布局：GridItem 按 colStart/rowStart/colSpan/rowSpan 定位
+            // 标准网格布局：GridItem 按 colStart/rowStart/colSpan/rowSpan 定位。
+            // 居中偏移（如启用「单卡居中」）通过 gridOffsetY 统一施加，
+            // 编辑态与屏保态取值相同 —— 不再有「只有屏保态下移」的特判。
             Column() {
               Grid() {
                 ForEach(this.gridEntries(), (entry: ScreensaverGridEntry) => {
@@ -1827,8 +1932,8 @@ export struct ScreenSaverPlayPage {
               // 宽屏编辑态网格限宽 480：编辑视图不至于铺满大屏
               .width(this.editMode && this.isWide ? SCREEN_SAVER_EDIT_MAX_WIDTH : '100%')
               .height('100%')
-              // 播放态内容整体下移（居中观感）
-              .translate({ y: this.playCenterOffsetY() })
+              // 统一的内容层垂直偏移（默认 0；仅「单卡居中」设置开启时非 0）
+              .translate({ y: this.gridOffsetY() })
               .onClick((): void => {
                 this.handleScreenTap();
               })

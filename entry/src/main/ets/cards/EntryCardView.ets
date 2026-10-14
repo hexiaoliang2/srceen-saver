@@ -1,22 +1,42 @@
 /**
  * =============================================================================
- * 应用入口卡片视图（EntryCardView.ets，需求 A）
+ * 应用入口卡片视图（EntryCardView.ets，需求 A + 变更项 6）
  * =============================================================================
  *
  * 【这个文件是干什么的】
- * 一个「只做跳转」的卡片：显示用户自己填写的名称/副标题，点击时用官方
- * `UIAbilityContext.openLink` 打开用户填写的链接。
+ * 一个「只做跳转」的卡片：显示目标 App 的名称与**自绘中性图标**，
+ * 点击时用官方 `UIAbilityContext.openLink` 打开用户填写的链接。
  *
- * 【为什么是「空壳卡片」而不是内容卡片】
- * QQ音乐 / 抖音 / 小红书等第三方内容没有面向三方应用的公开内容接口，
- * 抓取/逆向都违反平台协议（详见 docs/card-feasibility.md）。因此这里
- * 只实现「跳转」这一被官方文档支持的合法能力：
- *   - 不内置任何第三方名称、图标、链接（全部由用户填写）；
- *   - 不展示、不缓存任何第三方内容。
+ * 【变更项 6：能不能显示目标 App 的真实图标？—— 官方结论：三方应用做不到】
+ * 已核实（本地官方文档，核对日期 2026-10-14）：
+ *   · 查询**其他**已安装应用的信息（名称/图标）只能走
+ *     `bundleManager.getBundleInfo` / `getAllBundleInfo` / `getApplicationInfo`，
+ *     这些接口需要 **ohos.permission.GET_BUNDLE_INFO_PRIVILEGED**（系统级权限），
+ *     三方应用无法申请（见 FAQ「如何判断应用是否为系统应用」faqs-ability-169）。
+ *   · 三方应用可用的只有 `bundleManager.getBundleInfoForSelf`（只能查自己）。
+ *   · 「目标应用是否安装」官方可用 `canOpenLink` 判断，但要求目标 scheme
+ *     预先声明在 module.json5 的 querySchemes 里（最多 200 个），
+ *     而本卡片的链接由用户自由填写，无法预知 scheme，因此不做安装探测
+ *     （FAQ「如何判断应用程序是否安装」faqs-ability-142 / faqs-package-structure-62）。
+ * 因此按需求改为**降级方案**：
+ *   · 图标 = 程序化绘制的**中性图标**（圆角方块 + 名称首字 + 由名称稳定派生的
+ *     色相），不含任何第三方商标/图标素材，也不下载、不缓存任何第三方素材；
+ *   · 未安装目标应用时：不显示错误图标、不做任何错误提示（屏保态点击失败
+ *     只记日志；编辑态「打开」按钮失败才 toast），屏保态规则不变。
+ *
+ * 【图标加载与缓存策略（变更项 6 要求）】
+ * 图标是**纯绘制**的，没有任何图片查询/解码/IO，因此不存在「每次渲染重复查询」
+ * 的问题，也就不需要图片缓存；「缓存」体现为：由 displayName 稳定派生的颜色
+ * 每次绘制结果完全一致（同一名称永远同一颜色）。若未来系统开放跨应用图标查询，
+ * 再在 AppModel 增加 bundleName → icon 的内存 LRU 缓存（当前不可用，不做假实现）。
+ *
+ * 【尺寸变化时图标如何变化】
+ * 图标边长随内容密度档变化：minimal 26vp / compact 34vp / full 40vp，
+ * 并且整卡按 GridItem 尺寸等比缩放时图标随容器一起变化（不留固定像素）。
  *
  * 【打开失败怎么办】
- * openLink 抛错（未安装目标应用、链接不可用、scheme 未在 querySchemes 中声明等）
- * 时统一给降级文案，绝不静默失败。
+ * edit 态「打开」按钮失败 → toast 降级文案（用户正在操作，需要反馈）；
+ * play 态（屏保展示态）失败 → 只记日志，不弹提示（屏保态规则不变）。
  * =============================================================================
  */
 
@@ -36,17 +56,38 @@ export struct ScreensaverEntryCard {
     return screenSaverResolveDensity(this.card.cardType, this.card.colSpan, this.card.rowSpan);
   }
 
-  /** 弹 toast 提示。 */
-  private toast(message: string): void {
-    try {
-      this.getUIContext().getPromptAction().showToast({ message: message, duration: 1500 });
-    } catch (err) {
-      const error = err as Error;
-      ScreenSaverLogger.warn(`toast failed: ${error.message}`);
+  /** 中性图标边长（vp）：随密度档变化。 */
+  private iconSize(): number {
+    if (this.density() === 'minimal') {
+      return 26;
     }
+    return this.density() === 'compact' ? 34 : 40;
   }
 
-  /** 名称首字（极简档用，1×1 放不下完整名称）。 */
+  /**
+   * 由名称稳定派生一个色相（0~23 档），映射到一组中性配色。
+   * 目的：同一名称永远同一颜色（这就是「缓存」），不同入口可相互区分；
+   * 颜色全部是本文件内的固定色值，不来自任何第三方素材。
+   */
+  private iconPaletteIndex(): number {
+    const name = this.card.entry.displayName;
+    if (name.length === 0) {
+      return 0;
+    }
+    let hash = 0;
+    for (let index = 0; index < name.length; index++) {
+      hash = (hash * 31 + name.charCodeAt(index)) % 9973;
+    }
+    return hash % 6;
+  }
+
+  /** 中性图标底色（6 档固定色，色相按名称稳定映射）。 */
+  private iconColor(): string {
+    const palette: string[] = ['#4A6B8A', '#5B7F6B', '#8A6B4A', '#6B5B8A', '#8A4A5B', '#4A7F8A'];
+    return palette[this.iconPaletteIndex()];
+  }
+
+  /** 名称首字（极简档与图标内都用，1×1 放不下完整名称）。 */
   private initial(): string {
     const name = this.card.entry.displayName;
     if (name.length === 0) {
@@ -56,59 +97,109 @@ export struct ScreensaverEntryCard {
   }
 
   /**
-   * 打开链接：与「屏保态单击卡片」「设置面板测试打开」共用同一个
-   * AppLinkLauncher 实现（变更项 2 要求覆盖该卡片的所有点击路径）。
+   * 自绘中性图标：圆角方块 + 名称首字。
+   * 无外部素材、无网络请求、无解码；尺寸随密度档变化。
    */
-  private async openTarget(): Promise<void> {
+  @Builder
+  neutralIcon(size: number, fontSize: number) {
+    Column() {
+      Text(this.initial())
+        .fontSize(fontSize)
+        .fontColor('#F2F2F2')
+        .fontWeight(FontWeight.Medium)
+        .maxLines(1)
+    }
+    .width(size)
+    .height(size)
+    .borderRadius(size * 0.24)
+    .backgroundColor(this.iconColor())
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /**
+   * 打开链接：与「屏保态单击卡片」「设置面板测试打开」共用同一个
+   * AppLinkLauncher 实现。
+   * showFeedback=true（编辑态按钮）失败给 toast；false（屏保态）只记日志。
+   */
+  private async openTarget(showFeedback: boolean): Promise<void> {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined) {
-      this.toast('无法获取应用上下文');
+      this.notifyResult(false, '无法获取应用上下文', showFeedback);
       return;
     }
-    const result = await screenSaverOpenLink(context, this.card.entry.link);
+    const result = await screenSaverOpenLink(context, this.card.entry.link.trim());
     if (!result.ok) {
-      this.toast(result.reason);
+      this.notifyResult(false, result.reason, showFeedback);
+      return;
+    }
+    ScreenSaverLogger.info(`entry link opened: ${this.card.entry.link}`);
+  }
+
+  /** 失败反馈：编辑态 toast，屏保态只记日志（不弹失败提示）。 */
+  private notifyResult(ok: boolean, reason: string, showFeedback: boolean): void {
+    if (ok) {
+      return;
+    }
+    ScreenSaverLogger.warn(`entry open failed: ${reason}`);
+    if (!showFeedback) {
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: reason, duration: 1500 });
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`toast failed: ${error.message}`);
     }
   }
 
-  /** 点击「打开」按钮才跳转（按钮自带 onClick，点它不会连带触发卡片选中）。 */
+  /** 编辑态「打开」按钮：只有编辑态可点（播放态跳转由屏保页统一分发）。 */
   private handleTap(): void {
     if (this.cardMode !== 'edit') {
       return;
     }
-    void this.openTarget();
+    void this.openTarget(true);
   }
 
   build() {
-    Column({ space: 2 }) {
+    Column({ space: 4 }) {
       if (this.card.entry.displayName.length === 0) {
+        this.neutralIcon(this.iconSize(), this.density() === 'minimal' ? 13 : 16)
         Text(this.density() === 'minimal' ? '入口' : '未配置入口')
-          .fontSize(this.density() === 'minimal' ? 10 : 12)
+          .fontSize(this.density() === 'minimal' ? 9 : 11)
           .fontColor('#8C8C8C')
           .maxLines(1)
       } else if (this.density() === 'minimal') {
-        // 1×1：只放首字（放不下按钮，跳转请在更大的尺寸或设置面板里操作）
-        Text(this.initial())
-          .fontSize(22)
-          .fontColor('#F2F2F2')
-          .fontWeight(FontWeight.Medium)
-          .maxLines(1)
-      } else {
+        // 1×1 / 2×1 / 1×2：图标 + 短名（放不下按钮，跳转走屏保态点击或大尺寸）
+        this.neutralIcon(26, 13)
         Text(this.card.entry.displayName)
-          .fontSize(this.density() === 'compact' ? 13 : 15)
-          .fontColor('#F2F2F2')
+          .fontSize(9)
+          .fontColor('#D0D0D0')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (this.card.entry.subtitle.length > 0) {
-          Text(this.card.entry.subtitle)
-            .fontSize(11)
-            .fontColor('#8C8C8C')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
+      } else {
+        Row({ space: 8 }) {
+          this.neutralIcon(this.iconSize(), this.density() === 'compact' ? 15 : 18)
+          Column({ space: 1 }) {
+            Text(this.card.entry.displayName)
+              .fontSize(this.density() === 'compact' ? 13 : 15)
+              .fontColor('#F2F2F2')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.card.entry.subtitle.length > 0) {
+              Text(this.card.entry.subtitle)
+                .fontSize(11)
+                .fontColor('#8C8C8C')
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
         }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
         // 编辑态才显示「打开」：播放态保持屏保纯净（触摸穿透）。
-        // 注意：这里刻意不用「整卡可点」——整卡的 onClick 会吞掉卡片的
-        // 「单击选中」，与编辑态选中模型冲突（缺陷 1 的同一类问题）。
         if (this.cardMode === 'edit') {
           Text('打开')
             .fontSize(11)
@@ -116,7 +207,6 @@ export struct ScreensaverEntryCard {
             .padding({ left: 12, right: 12, top: 4, bottom: 4 })
             .borderRadius(6)
             .backgroundColor('#26262B')
-            .margin({ top: 4 })
             .onClick((): void => {
               this.handleTap();
             })

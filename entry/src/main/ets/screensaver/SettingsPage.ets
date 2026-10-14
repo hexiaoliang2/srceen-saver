@@ -20,13 +20,39 @@
  */
 
 import { common } from '@kit.AbilityKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { SCREEN_SAVER_COLORS } from '../common/ScreenSaverStyle';
 import { ScreenSaverChip, ScreenSaverToggleRow } from '../common/SheetParts';
 import { screenSaverApplyFontScale } from '../common/FontScale';
 import { screenSaverAppModel } from '../model/AppModel';
 import { screenSaverMediaAccess } from '../common/MediaAccess';
-import { SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS } from '../model/ConfigModels';
+import { screenSaverCanvasBackground } from '../common/CanvasBackground';
+import {
+  SCREEN_SAVER_CANVAS_COLORS,
+  SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
+  SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS,
+  ScreensaverCanvasColorOption
+} from '../model/ConfigModels';
+
+/** 背景色选择列表：默认纯黑 + 24 个预设色（变更项 7）。 */
+function screenSaverCanvasColorOptions(): ScreensaverCanvasColorOption[] {
+  const options: ScreensaverCanvasColorOption[] = [];
+  const defaultOption: ScreensaverCanvasColorOption = {
+    value: SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
+    label: '纯黑·默认'
+  };
+  options.push(defaultOption);
+  for (const option of SCREEN_SAVER_CANVAS_COLORS) {
+    options.push(option);
+  }
+  return options;
+}
+
+const CANVAS_COLOR_OPTIONS: ScreensaverCanvasColorOption[] = screenSaverCanvasColorOptions();
+
+/** 内置示例背景图的文件名（对应 resources/rawfile/sample_photos/ 下的自生成素材）。 */
+const CANVAS_SAMPLE_FILE: string = 'photo_landscape_4k.jpg';
 
 @ComponentV2
 export struct ScreenSaverSettingsPage {
@@ -54,6 +80,132 @@ export struct ScreenSaverSettingsPage {
       return;
     }
     await screenSaverMediaAccess.openPermissionSetting(context);
+  }
+
+  // ==================== 屏保整体背景（变更项 7） ====================
+
+  /** 切换背景色：写入设置并落盘（背景层在屏保页最底层，不参与卡片定位）。 */
+  private setCanvasColor(value: string): void {
+    screenSaverAppModel.layout.settings.canvasColor = value;
+    screenSaverAppModel.save();
+  }
+
+  /**
+   * 选择本地图片作为背景（替代「桌面透视模糊」，原因见下方说明文案）。
+   * 选完立即做一次**离屏模糊**并把结果缓存起来（screenSaverCanvasBackground），
+   * 之后渲染只用缓存位图，不再重复计算。
+   */
+  private async pickCanvasImage(): Promise<void> {
+    const picked = await screenSaverMediaAccess.pickImages(1);
+    if (picked.length === 0) {
+      return;
+    }
+    const settings = screenSaverAppModel.layout.settings;
+    settings.canvasImageUri = picked[0];
+    screenSaverAppModel.save();
+    await screenSaverCanvasBackground.ensure(settings.canvasImageUri, settings.canvasBlur);
+    this.toast(settings.canvasBlur ? '已设置背景图片（离屏模糊已计算并缓存）' : '已设置背景图片');
+  }
+
+  /** 清除自定义背景图片（回到纯色背景）。 */
+  private clearCanvasImage(): void {
+    const settings = screenSaverAppModel.layout.settings;
+    if (settings.canvasImageUri.length === 0) {
+      return;
+    }
+    settings.canvasImageUri = '';
+    screenSaverAppModel.save();
+    screenSaverCanvasBackground.clear();
+    this.toast('已移除背景图片');
+  }
+
+  /**
+   * 使用内置示例图作为背景（自测用，与视频/相册面板的「示例素材」同一套做法）：
+   * 工程内自生成素材（rawfile），复制到应用沙箱后写入背景配置，
+   * 并立刻做一次离屏模糊（若开关打开）以便验证缓存复用。
+   */
+  private async useSampleCanvasImage(): Promise<void> {
+    const context = this.context();
+    if (context === undefined) {
+      return;
+    }
+    try {
+      const sampleDir = `${context.filesDir}/canvas_backgrounds`;
+      try {
+        fileIo.mkdirSync(sampleDir);
+      } catch (mkdirError) {
+        ScreenSaverLogger.info('canvas sample dir already ready');
+      }
+      const targetPath = `${sampleDir}/${CANVAS_SAMPLE_FILE}`;
+      let exists = false;
+      try {
+        exists = fileIo.accessSync(targetPath);
+      } catch (accessError) {
+        exists = false;
+      }
+      if (!exists) {
+        const content = await context.resourceManager.getRawFileContent(`sample_photos/${CANVAS_SAMPLE_FILE}`);
+        const file = fileIo.openSync(targetPath, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
+        try {
+          fileIo.writeSync(file.fd, content.buffer as ArrayBuffer);
+        } finally {
+          fileIo.closeSync(file);
+        }
+      }
+      const settings = screenSaverAppModel.layout.settings;
+      settings.canvasImageUri = `file://${targetPath}`;
+      screenSaverAppModel.save();
+      await screenSaverCanvasBackground.ensure(settings.canvasImageUri, settings.canvasBlur);
+      this.toast('已使用示例背景图（模糊按当前开关）');
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`canvas sample image failed: ${error.message}`);
+      this.toast('示例背景图不可用');
+    }
+  }
+
+  /** 背景图片显示名（取 uri 最后一段，过长截断）。 */
+  private canvasImageName(): string {
+    const uri = screenSaverAppModel.layout.settings.canvasImageUri;
+    if (uri.length === 0) {
+      return '未选择';
+    }
+    const slash = uri.lastIndexOf('/');
+    const name = slash >= 0 ? uri.substring(slash + 1) : uri;
+    return name.length > 18 ? `${name.substring(0, 18)}…` : name;
+  }
+
+  /** 背景色选项（色块 + 名字，点击即切换）。 */
+  @Builder
+  canvasColorGrid() {
+    Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+      ForEach(CANVAS_COLOR_OPTIONS, (option: ScreensaverCanvasColorOption) => {
+        Column({ space: 3 }) {
+          Column()
+            .width(34)
+            .height(34)
+            .borderRadius(17)
+            .backgroundColor(option.value)
+            .border({
+              width: screenSaverAppModel.layout.settings.canvasColor === option.value ? 2 : 1,
+              color: screenSaverAppModel.layout.settings.canvasColor === option.value ?
+              SCREEN_SAVER_COLORS.accent : '#33FFFFFF'
+            })
+          Text(option.label)
+            .fontSize(9)
+            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width(60)
+        .margin({ right: 2, bottom: 8 })
+        .onClick((): void => {
+          this.setCanvasColor(option.value);
+        })
+      }, (option: ScreensaverCanvasColorOption): string => `canvas_${option.value}`)
+    }
+    .width('100%')
+    .margin({ top: 10 })
   }
 
   build() {
@@ -225,6 +377,93 @@ export struct ScreenSaverSettingsPage {
                 screenSaverAppModel.save();
               }
             })
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(10)
+          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+
+          // ---------- 屏保整体背景（变更项 7） ----------
+          Column({ space: 8 }) {
+            Row() {
+              Column() {
+                Text('屏保背景')
+                  .fontSize(14)
+                  .fontColor('#CCCCCC')
+                Text('默认纯黑 · 24 个预设色 · 可自选本地图片')
+                  .fontSize(11)
+                  .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                  .margin({ top: 2 })
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Text(screenSaverAppModel.layout.settings.canvasColor)
+                .fontSize(11)
+                .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+            }
+            .width('100%')
+
+            this.canvasColorGrid()
+
+            // ---- 自定义背景图片（替代「桌面透视模糊」） ----
+            Row() {
+              Text('背景图片')
+                .fontSize(14)
+                .fontColor('#CCCCCC')
+              Blank()
+              Text(this.canvasImageName())
+                .fontSize(12)
+                .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text('选择')
+                .fontSize(13)
+                .fontColor(SCREEN_SAVER_COLORS.accent)
+                .margin({ left: 10 })
+                .onClick((): void => {
+                  void this.pickCanvasImage();
+                })
+              Text('示例图')
+                .fontSize(13)
+                .fontColor(SCREEN_SAVER_COLORS.accent)
+                .margin({ left: 10 })
+                .onClick((): void => {
+                  void this.useSampleCanvasImage();
+                })
+              if (screenSaverAppModel.layout.settings.canvasImageUri.length > 0) {
+                Text('移除')
+                  .fontSize(13)
+                  .fontColor(SCREEN_SAVER_COLORS.danger)
+                  .margin({ left: 10 })
+                  .onClick((): void => {
+                    this.clearCanvasImage();
+                  })
+              }
+            }
+            .width('100%')
+
+            ScreenSaverToggleRow({
+              label: '背景模糊',
+              tip: '仅对自选图片生效：离屏计算一次并缓存，不做实时模糊',
+              isOn: screenSaverAppModel.layout.settings.canvasBlur,
+              onChange: (value: boolean): void => {
+                screenSaverAppModel.layout.settings.canvasBlur = value;
+                screenSaverAppModel.save();
+                const settings = screenSaverAppModel.layout.settings;
+                if (settings.canvasImageUri.length > 0) {
+                  void screenSaverCanvasBackground.ensure(settings.canvasImageUri, value);
+                }
+              }
+            })
+
+            Text('说明：系统壁纸接口（@ohos.wallpaper）自 API 9 起为系统 API，' +
+              '三方应用无法读取桌面壁纸、也无法对桌面做模糊（需要系统级权限 GET_WALLPAPER），' +
+              '因此这里提供「自选本地图片 + 一次性离屏模糊缓存」作为替代：不是实时桌面模糊，' +
+              '换桌面壁纸后需要重新选图。⚠ 浅色背景会显著增加屏幕耗电（OLED 上等效点亮更多像素），' +
+              '与「极低功耗」目标冲突，默认纯黑最省电。')
+              .fontSize(11)
+              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+              .width('100%')
           }
           .width('100%')
           .padding(14)

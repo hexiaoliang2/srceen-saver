@@ -19,7 +19,7 @@
  *
  * 【变更项 4：等比完整显示（Contain）】
  * 画面一律完整可见、不裁切（ImageFit.Contain）；内容与卡片比例不一致时露出
- * 黑边（底色由 SCREEN_SAVER_LETTERBOX_COLOR 决定），判据函数在 common/ContentFit.ets。
+ * 黑边（letterbox/pillarbox）区域全透明（变更项 4），判据函数在 common/ContentFit.ets。
  *
  * 【generation（代数）机制】
  * 异步解码随时可能被「换照片源/重新排版」打断。每次重置都 generation++，
@@ -60,12 +60,17 @@ const SCREEN_SAVER_PLACEHOLDER_NEUTRAL: string = '#1A1A1E';
 // 占位底色按照片主色调暗的系数。
 const SCREEN_SAVER_PLACEHOLDER_DARKEN: number = 0.45;
 /**
- * 黑边（letterbox/pillarbox）底色（变更项 4，实现侧方案，待确认）。
- * 选纯黑的原因：① 与屏保画布同色，黑边看起来是「留白」而不是「彩色边框」；
- * ② OLED 省电；③ 照片轮播时底色恒定，不会因为每张照片主色不同而闪烁。
- * 明确不使用模糊填充（blur letterbox）：实时模糊属于常驻渲染开销，与省电约束冲突。
+ * 黑边（letterbox/pillarbox）区域的处理（变更项 4，已改为**全透明**）。
+ *
+ * 规则：图片一律 `ImageFit.Contain`（等比完整显示、不裁切）。
+ * 比例不一致时 Contain 会在卡片里留出 letterbox/pillarbox 区域——
+ * 该区域现在**完全透明**（不再填纯黑），露出的是屏保整体背景
+ * （默认纯黑，也可以是设置里的预设色或自定义图片背景）。
+ *
+ * 为什么改：需求要求黑边透明；透明后「卡片边界」在浅色背景下会变弱，
+ * 观察与建议见交付文档（保留 1vp 细描边作为边界，必要时可加投影）。
+ * 仅「还没出图」的加载态保留照片主色占位（它不是黑边，是占位底色）。
  */
-const SCREEN_SAVER_LETTERBOX_COLOR: string = '#000000';
 
 @ComponentV2
 export struct ScreensaverPhotoCard {
@@ -687,22 +692,25 @@ export struct ScreensaverPhotoCard {
 
   /**
    * 界面结构（Stack 分层，从底到顶）：
-   *   1. 底色：还没出图时用照片主色调暗（加载瞬间不刺眼）；出图后固定用黑边色
-   *      ——此时它只会在内容与卡片比例不一致时露出来（letterbox/pillarbox）
+   *   1. 底色：还没出图时用照片主色调暗（加载瞬间不刺眼）；出图后透明
+   *      ——此时 Contain 留出的 letterbox/pillarbox 区域会露出整体背景（变更项 4）
    *   2. 当前照片（**Contain：等比完整显示，不裁切**）
    *   3. 淡入中的新照片（opacity 由动画驱动，同样 Contain）
    *   4. 「加载中…」/「还没有照片」/「无相册访问权限」占位文字
    *   5. 左下角信息条（拍摄日期/文件名）
    *
    * 关于「黑边由谁产生」：内容与卡片比例一致时 Contain 正好铺满（无黑边）；
-   * 不一致时 Contain 会等比缩小到完整可见，多出来的部分露出底色（黑边）。
+   * 不一致时 Contain 会等比缩小到完整可见，多出来的部分**完全透明**（变更项 4），
+   * 露出屏保整体背景。
    */
   build() {
     Stack() {
       Column()
         .width('100%')
         .height('100%')
-        .backgroundColor(this.currentPixel === undefined ? this.placeholderColor : SCREEN_SAVER_LETTERBOX_COLOR)
+        // 变更项 4：出图后底色透明（letterbox 区域全透明，露出整体背景）；
+        // 未出图时仍用照片主色占位，避免加载瞬间的闪烁。
+        .backgroundColor(this.currentPixel === undefined ? this.placeholderColor : Color.Transparent)
       if (this.currentPixel !== undefined) {
         Image(this.currentPixel)
           .width('100%')

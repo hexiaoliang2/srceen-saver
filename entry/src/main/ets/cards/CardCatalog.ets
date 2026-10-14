@@ -60,14 +60,18 @@ const CLOCK_SIZE_SPEC: ScreensaverCardSizeSpec = {
   entries: [
     { colSpan: 1, rowSpan: 1, density: 'minimal', presetLabel: '' },
     { colSpan: 2, rowSpan: 1, density: 'minimal', presetLabel: '2×1' },
-    { colSpan: 3, rowSpan: 1, density: 'minimal', presetLabel: '' },
-    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '' },
+    { colSpan: 3, rowSpan: 1, density: 'minimal', presetLabel: '3×1' },
+    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '4×1' },
     { colSpan: 1, rowSpan: 2, density: 'compact', presetLabel: '' },
     { colSpan: 1, rowSpan: 3, density: 'minimal', presetLabel: '1×3' },
-    { colSpan: 2, rowSpan: 2, density: 'compact', presetLabel: '' },
+    { colSpan: 2, rowSpan: 2, density: 'compact', presetLabel: '2×2' },
+    { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '3×2' },
     { colSpan: 2, rowSpan: 3, density: 'full', presetLabel: '' },
     { colSpan: 4, rowSpan: 2, density: 'full', presetLabel: '4×2' },
+    { colSpan: 3, rowSpan: 3, density: 'compact', presetLabel: '3×3' },
     { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '4×3' },
+    { colSpan: 2, rowSpan: 4, density: 'full', presetLabel: '2×4' },
+    { colSpan: 3, rowSpan: 4, density: 'full', presetLabel: '3×4' },
     { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '4×4' }
   ]
 };
@@ -133,14 +137,18 @@ const GIT_SIZE_SPEC: ScreensaverCardSizeSpec = {
   entries: [
     { colSpan: 1, rowSpan: 1, density: 'minimal', presetLabel: '' },
     { colSpan: 2, rowSpan: 1, density: 'minimal', presetLabel: '' },
+    { colSpan: 3, rowSpan: 1, density: 'compact', presetLabel: '3×1' },
     { colSpan: 1, rowSpan: 2, density: 'minimal', presetLabel: '' },
     { colSpan: 1, rowSpan: 3, density: 'minimal', presetLabel: '1×3' },
     { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '' },
     { colSpan: 2, rowSpan: 2, density: 'compact', presetLabel: '' },
     { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '' },
     { colSpan: 2, rowSpan: 3, density: 'compact', presetLabel: '' },
+    { colSpan: 2, rowSpan: 4, density: 'compact', presetLabel: '2×4' },
     { colSpan: 4, rowSpan: 2, density: 'full', presetLabel: '4×2' },
+    { colSpan: 3, rowSpan: 3, density: 'compact', presetLabel: '3×3' },
     { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '4×3' },
+    { colSpan: 3, rowSpan: 4, density: 'full', presetLabel: '3×4' },
     { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '4×4' }
   ]
 };
@@ -155,17 +163,20 @@ const WEATHER_SIZE_SPEC: ScreensaverCardSizeSpec = {
   maxRowSpan: 4,
   entries: [
     { colSpan: 1, rowSpan: 1, density: 'minimal', presetLabel: '1×1' },
-    { colSpan: 2, rowSpan: 1, density: 'minimal', presetLabel: '' },
+    { colSpan: 2, rowSpan: 1, density: 'minimal', presetLabel: '2×1' },
+    { colSpan: 3, rowSpan: 1, density: 'compact', presetLabel: '3×1' },
     { colSpan: 1, rowSpan: 2, density: 'minimal', presetLabel: '' },
     { colSpan: 1, rowSpan: 3, density: 'minimal', presetLabel: '' },
     { colSpan: 1, rowSpan: 4, density: 'minimal', presetLabel: '' },
     { colSpan: 2, rowSpan: 2, density: 'compact', presetLabel: '2×2' },
-    { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '' },
-    { colSpan: 2, rowSpan: 3, density: 'compact', presetLabel: '' },
-    { colSpan: 3, rowSpan: 3, density: 'compact', presetLabel: '' },
-    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '' },
+    { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '3×2' },
+    { colSpan: 2, rowSpan: 3, density: 'compact', presetLabel: '2×3' },
+    { colSpan: 3, rowSpan: 3, density: 'compact', presetLabel: '3×3' },
+    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '4×1' },
     { colSpan: 4, rowSpan: 2, density: 'full', presetLabel: '4×2' },
+    { colSpan: 2, rowSpan: 4, density: 'compact', presetLabel: '2×4' },
     { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '4×3' },
+    { colSpan: 3, rowSpan: 4, density: 'full', presetLabel: '3×4' },
     { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '4×4' }
   ]
 };
@@ -180,14 +191,18 @@ const ENTRY_SIZE_SPEC: ScreensaverCardSizeSpec = {
   entries: [
     { colSpan: 1, rowSpan: 1, density: 'minimal', presetLabel: '1×1' },
     { colSpan: 2, rowSpan: 1, density: 'minimal', presetLabel: '2×1' },
+    { colSpan: 3, rowSpan: 1, density: 'compact', presetLabel: '3×1' },
     { colSpan: 1, rowSpan: 2, density: 'minimal', presetLabel: '' },
-    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '' },
+    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '4×1' },
     { colSpan: 2, rowSpan: 2, density: 'compact', presetLabel: '2×2' },
-    { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '' },
-    { colSpan: 2, rowSpan: 3, density: 'compact', presetLabel: '' },
+    { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '3×2' },
+    { colSpan: 2, rowSpan: 3, density: 'compact', presetLabel: '2×3' },
     { colSpan: 4, rowSpan: 2, density: 'compact', presetLabel: '4×2' },
-    { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '' },
-    { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '' }
+    { colSpan: 3, rowSpan: 3, density: 'compact', presetLabel: '3×3' },
+    { colSpan: 2, rowSpan: 4, density: 'compact', presetLabel: '2×4' },
+    { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '4×3' },
+    { colSpan: 3, rowSpan: 4, density: 'full', presetLabel: '3×4' },
+    { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '4×4' }
   ]
 };
 
@@ -407,15 +422,55 @@ export function screenSaverResolveDensity(cardType: ScreensaverCardType, colSpan
   return 'full';
 }
 
-/** 设置面板的「尺寸」快捷胶囊：矩阵表里 presetLabel 非空的行。 */
+/**
+ * 需求给定的 13 档「标准尺寸」（变更项 2 通道 A：设置面板可选尺寸集合）。
+ * 原文顺序为 4×4,4×3,4×2,4×1,3×4,3×3,3×2,3×1,2×4,2×3,2×2,2×1,1×1；
+ * 面板按「从小到大」展示更利于点选，因此这里按列优先升序排列（集合完全一致）。
+ * 六类卡片的尺寸矩阵都必须把这 13 档登记为合法尺寸（各自密度按类型定义），
+ * 由 CardCatalog 的数据表保证；吸附函数（screenSaverSnapCardSize）据此工作。
+ */
+export const SCREEN_SAVER_STANDARD_SIZES: ScreensaverSizePreset[] = [
+  { colSpan: 1, rowSpan: 1, label: '1×1' },
+  { colSpan: 2, rowSpan: 1, label: '2×1' },
+  { colSpan: 3, rowSpan: 1, label: '3×1' },
+  { colSpan: 4, rowSpan: 1, label: '4×1' },
+  { colSpan: 2, rowSpan: 2, label: '2×2' },
+  { colSpan: 3, rowSpan: 2, label: '3×2' },
+  { colSpan: 4, rowSpan: 2, label: '4×2' },
+  { colSpan: 2, rowSpan: 3, label: '2×3' },
+  { colSpan: 3, rowSpan: 3, label: '3×3' },
+  { colSpan: 4, rowSpan: 3, label: '4×3' },
+  { colSpan: 2, rowSpan: 4, label: '2×4' },
+  { colSpan: 3, rowSpan: 4, label: '3×4' },
+  { colSpan: 4, rowSpan: 4, label: '4×4' }
+];
+
+/**
+ * 设置面板的「尺寸」快捷胶囊（变更项 2 通道 A）。
+ *
+ * 组成 = 13 档标准尺寸（按类型过滤为合法） + 矩阵里额外登记的预设
+ * （如相册/视频的 1×3、1×4 窄条）。这样：
+ *   · 需求列出的 13 档在六类卡片上都可点选；
+ *   · 既有的窄条尺寸不会因为列表改版而消失（保持既有能力）。
+ */
 export function screenSaverSizePresets(cardType: ScreensaverCardType): ScreensaverSizePreset[] {
   const spec = screenSaverFindSizeSpec(cardType);
-  if (spec === undefined) {
-    return [];
-  }
   const presets: ScreensaverSizePreset[] = [];
+  for (const standard of SCREEN_SAVER_STANDARD_SIZES) {
+    if (screenSaverIsSizeAllowed(cardType, standard.colSpan, standard.rowSpan)) {
+      presets.push(standard);
+    }
+  }
+  if (spec === undefined) {
+    return presets;
+  }
   for (const entry of spec.entries) {
     if (screenSaverIsFallbackEntry(entry) || entry.presetLabel.length === 0) {
+      continue;
+    }
+    const already = presets.some((preset: ScreensaverSizePreset): boolean =>
+    preset.colSpan === entry.colSpan && preset.rowSpan === entry.rowSpan);
+    if (already) {
       continue;
     }
     const preset: ScreensaverSizePreset = {

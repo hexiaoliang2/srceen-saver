@@ -26,7 +26,8 @@ import {
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
   ScreenSaverSizePresetRow,
-  ScreenSaverToggleRow
+  ScreenSaverToggleRow,
+  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
@@ -158,13 +159,15 @@ export struct ScreenSaverVideoSettingsPanel {
   }
 
   /**
-   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardTo：吸附 + 碰撞校验）。
+   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardToDetailed：吸附 + 碰撞校验
+   * + 吸附/占用反馈，变更项 2 通道 A）。
    * 视频卡上限 4×4 是功耗约束（解码面积越大越耗电）。
    */
   private applySizePreset(preset: ScreensaverSizePreset): void {
-    const resized = screenSaverAppModel.resizeCardTo(this.card.id, preset.colSpan, preset.rowSpan);
-    if (!resized) {
-      this.toast('该尺寸不可用（与其它卡片重叠或越界）');
+    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
+    const message = screenSaverResizeFeedbackText(outcome);
+    if (message.length > 0) {
+      this.toast(message);
     }
   }
 

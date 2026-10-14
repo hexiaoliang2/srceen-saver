@@ -26,7 +26,7 @@ import { http } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverAppModel } from './AppModel';
-import { ScreensaverWeatherData } from './ConfigModels';
+import { ScreensaverWeatherCondition, ScreensaverWeatherData } from './ConfigModels';
 
 /** Open-Meteo 地理编码接口：城市名 → 经纬度（免密钥）。 */
 const SCREEN_SAVER_WEATHER_GEO_ENDPOINT: string = 'https://geocoding-api.open-meteo.com/v1/search';
@@ -54,12 +54,15 @@ interface WeatherRawGeoResponse {
 
 interface WeatherRawCurrent {
   temperature_2m?: number;
+  relative_humidity_2m?: number;
   weather_code?: number;
+  wind_speed_10m?: number;
 }
 
 interface WeatherRawDaily {
   temperature_2m_max?: number[];
   temperature_2m_min?: number[];
+  weather_code?: number[];
 }
 
 interface WeatherRawForecast {
@@ -86,6 +89,55 @@ export function screenSaverWeatherText(code: number): string {
   return '天气未知';
 }
 
+/**
+ * 天气代码 → 装饰类别（变更项 5）。
+ * 归并规则（与 WEATHER_CODE_TEXTS 一一对应）：
+ *   0 晴 → clear；1 晴间多云 → partly；2 多云 → cloudy；3 阴 → overcast；
+ *   45/48 雾/雾凇 → fog；51~57 毛毛雨/冻毛毛雨 → drizzle；
+ *   61~65 小/中/大雨 → rain；66/67 冻雨 → freezing；
+ *   71~77 雪/米雪 → snow；80~82 阵雨 → showers；85/86 阵雪 → snow；
+ *   95~99 雷暴 → thunder；其余 → unknown（不画装饰，只显示文字）。
+ */
+export function screenSaverWeatherConditionOf(code: number): ScreensaverWeatherCondition {
+  if (code === 0) {
+    return 'clear';
+  }
+  if (code === 1) {
+    return 'partly';
+  }
+  if (code === 2) {
+    return 'cloudy';
+  }
+  if (code === 3) {
+    return 'overcast';
+  }
+  if (code === 45 || code === 48) {
+    return 'fog';
+  }
+  if (code >= 51 && code <= 57) {
+    return 'drizzle';
+  }
+  if (code >= 61 && code <= 65) {
+    return 'rain';
+  }
+  if (code === 66 || code === 67) {
+    return 'freezing';
+  }
+  if (code >= 71 && code <= 77) {
+    return 'snow';
+  }
+  if (code >= 80 && code <= 82) {
+    return 'showers';
+  }
+  if (code === 85 || code === 86) {
+    return 'snow';
+  }
+  if (code === 95 || code === 96 || code === 99) {
+    return 'thunder';
+  }
+  return 'unknown';
+}
+
 /** 该卡片类型是否已具备发起请求的条件（用于视图判断展示哪种空态）。 */
 export function screenSaverWeatherReady(city: string, enabled: boolean): boolean {
   return enabled && city.length > 0;
@@ -101,11 +153,46 @@ export class ScreenSaverWeatherViewModel {
   @Trace highC: number = 0;
   @Trace lowC: number = 0;
   @Trace fetchedAt: number = 0;
+  /** 当前天气的装饰类别（变更项 5：按天气状态显示对应背景元素）。 */
+  @Trace condition: ScreensaverWeatherCondition = 'unknown';
+  // ---------- 变更项 5 扩展信息（-1 / -999 = 无数据，界面据此隐藏对应行） ----------
+  @Trace humidityPercent: number = -1;
+  @Trace windKph: number = -1;
+  @Trace tomorrowHighC: number = -999;
+  @Trace tomorrowLowC: number = -999;
+  @Trace tomorrowText: string = '';
+  @Trace tomorrowCondition: ScreensaverWeatherCondition = 'unknown';
 
   /** 是否有请求正在进行（防并发）。 */
   private inflight: boolean = false;
   /** 最近一次请求时间（节流基准）。 */
   private lastAttemptMs: number = 0;
+
+  /** 把一份天气数据（缓存或网络结果）写入视图状态。 */
+  private applyData(data: ScreensaverWeatherData): void {
+    this.city = data.city;
+    this.tempC = data.tempC;
+    this.description = data.description;
+    this.highC = data.highC;
+    this.lowC = data.lowC;
+    this.fetchedAt = data.fetchedAt;
+    this.humidityPercent = data.humidityPercent;
+    this.windKph = data.windKph;
+    this.tomorrowHighC = data.tomorrowHighC;
+    this.tomorrowLowC = data.tomorrowLowC;
+    this.condition = screenSaverWeatherConditionOf(this.weatherCodeOfDescription(data.description));
+    this.tomorrowCondition = screenSaverWeatherConditionOf(data.tomorrowCode);
+    this.tomorrowText = data.tomorrowCode >= 0 ? screenSaverWeatherText(data.tomorrowCode) : '';
+  }
+
+  /**
+   * 由中文描述反推天气代码（缓存里只存了描述）。
+   * 缓存结构保持不变的前提下，用它恢复「装饰类别」；找不到给 -1（unknown）。
+   */
+  private weatherCodeOfDescription(description: string): number {
+    const index = WEATHER_CODE_TEXTS.indexOf(description);
+    return index >= 0 ? WEATHER_CODE_ENTRIES[index] : -1;
+  }
 
   /** 用磁盘缓存注水：进入屏保先显示上次结果，避免空转。 */
   hydrateFromCache(): void {
@@ -113,12 +200,7 @@ export class ScreenSaverWeatherViewModel {
     if (cache === undefined || cache.fetchedAt <= 0) {
       return;
     }
-    this.city = cache.city;
-    this.tempC = cache.tempC;
-    this.description = cache.description;
-    this.highC = cache.highC;
-    this.lowC = cache.lowC;
-    this.fetchedAt = cache.fetchedAt;
+    this.applyData(cache);
     if (this.state === 'idle' || this.state === 'error') {
       this.state = 'success';
     }
@@ -176,12 +258,7 @@ export class ScreenSaverWeatherViewModel {
         return;
       }
       this.state = 'success';
-      this.city = data.city;
-      this.tempC = data.tempC;
-      this.description = data.description;
-      this.highC = data.highC;
-      this.lowC = data.lowC;
-      this.fetchedAt = data.fetchedAt;
+      this.applyData(data);
       screenSaverAppModel.setWeatherCache(data);
     } catch (err) {
       const error = err as BusinessError;
@@ -201,12 +278,7 @@ export class ScreenSaverWeatherViewModel {
     }
     const cache = screenSaverAppModel.getWeatherCache();
     if (useCacheOnFailure && cache !== undefined && cache.fetchedAt > 0) {
-      this.city = cache.city;
-      this.tempC = cache.tempC;
-      this.description = cache.description;
-      this.highC = cache.highC;
-      this.lowC = cache.lowC;
-      this.fetchedAt = cache.fetchedAt;
+      this.applyData(cache);
       this.state = 'offline';
       this.errorText = reason;
       return;
@@ -236,11 +308,12 @@ export class ScreenSaverWeatherViewModel {
     }
   }
 
-  /** 经纬度 → 实况 + 当日高低温。 */
+  /** 经纬度 → 实况 + 当日高低温 + 湿度/风速 + 明日趋势（变更项 5 扩展字段）。 */
   private async requestForecast(city: string, latitude: number, longitude: number): Promise<ScreensaverWeatherData
     | undefined> {
     const url = `${SCREEN_SAVER_WEATHER_FORECAST_ENDPOINT}?latitude=${latitude}&longitude=${longitude}` +
-      '&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1';
+      '&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m' +
+      '&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto&forecast_days=2';
     const text = await this.httpGet(url);
     if (text.length === 0) {
       return undefined;
@@ -253,6 +326,9 @@ export class ScreenSaverWeatherViewModel {
       }
       let high = current.temperature_2m;
       let low = current.temperature_2m;
+      let tomorrowHigh = -999;
+      let tomorrowLow = -999;
+      let tomorrowCode = -1;
       const daily = raw.daily;
       if (daily !== undefined) {
         const maxList = daily.temperature_2m_max;
@@ -263,6 +339,17 @@ export class ScreenSaverWeatherViewModel {
         if (minList !== undefined && minList.length > 0) {
           low = minList[0];
         }
+        // 明日趋势（forecast_days=2 的第二个元素）；缺失时保持 -999（界面隐藏该行）
+        if (maxList !== undefined && maxList.length > 1) {
+          tomorrowHigh = maxList[1];
+        }
+        if (minList !== undefined && minList.length > 1) {
+          tomorrowLow = minList[1];
+        }
+        const codeList = daily.weather_code;
+        if (codeList !== undefined && codeList.length > 1) {
+          tomorrowCode = codeList[1];
+        }
       }
       const data: ScreensaverWeatherData = {
         city: city,
@@ -270,7 +357,13 @@ export class ScreenSaverWeatherViewModel {
         description: screenSaverWeatherText(current.weather_code ?? -1),
         highC: Math.round(high),
         lowC: Math.round(low),
-        fetchedAt: Date.now()
+        fetchedAt: Date.now(),
+        humidityPercent: current.relative_humidity_2m !== undefined ?
+        Math.round(current.relative_humidity_2m) : -1,
+        windKph: current.wind_speed_10m !== undefined ? Math.round(current.wind_speed_10m) : -1,
+        tomorrowHighC: tomorrowHigh > -900 ? Math.round(tomorrowHigh) : -999,
+        tomorrowLowC: tomorrowLow > -900 ? Math.round(tomorrowLow) : -999,
+        tomorrowCode: tomorrowCode
       };
       return data;
     } catch (err) {

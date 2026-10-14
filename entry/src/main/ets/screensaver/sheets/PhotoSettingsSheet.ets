@@ -37,7 +37,8 @@ import {
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
   ScreenSaverSizePresetRow,
-  ScreenSaverToggleRow
+  ScreenSaverToggleRow,
+  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
@@ -334,13 +335,14 @@ export struct ScreenSaverPhotoSettingsPanel {
   }
 
   /**
-   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardTo：吸附 + 碰撞校验）。
-   * 失败说明目标尺寸与其它卡片重叠或超出网格，toast 提示用户。
+   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardToDetailed：吸附 + 碰撞校验
+   * + 吸附/占用反馈，变更项 2 通道 A）。
    */
   private applySizePreset(preset: ScreensaverSizePreset): void {
-    const resized = screenSaverAppModel.resizeCardTo(this.card.id, preset.colSpan, preset.rowSpan);
-    if (!resized) {
-      this.toast('该尺寸不可用（与其它卡片重叠或越界）');
+    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
+    const message = screenSaverResizeFeedbackText(outcome);
+    if (message.length > 0) {
+      this.toast(message);
     }
   }
 
