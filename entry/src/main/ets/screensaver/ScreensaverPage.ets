@@ -53,6 +53,8 @@ import { ScreensaverCardHost } from '../cards/CardHost';
 import { screenSaverAppModel } from '../model/AppModel';
 import { screenSaverGitViewModel } from '../model/GitViewModel';
 import { SCREEN_SAVER_COLORS, SCREEN_SAVER_METRICS } from '../common/ScreenSaverStyle';
+import { screenSaverCardPalette, screenSaverCurrentCardSkin, ScreensaverCardPalette,
+  ScreensaverCardSkin } from '../common/CardTheme';
 import { screenSaverCanvasBackground } from '../common/CanvasBackground';
 import {
   screenSaverGridMetrics,
@@ -95,7 +97,8 @@ import {
   SCREEN_SAVER_GRID_ROWS,
   SheetKind,
   ScreensaverCardInstance,
-  ScreensaverGridPos
+  ScreensaverGridPos,
+  ScreensaverInkTone
 } from '../model/ConfigModels';
 
 const FALLBACK_CARD_ID: string = 'fallback_clock';
@@ -236,6 +239,16 @@ export struct ScreenSaverPlayPage {
   /** 已加载的背景键（uri|blurRadius），用于避免重复触发加载。 */
   @Local canvasPixelKey: string = '';
 
+  // ============ 卡片皮肤（变更项 3.2/3.3：文字色三档 + 兜底投影） ============
+  /**
+   * 生效的文字墨色档（浅色/深色文字）。由 screenSaverCurrentCardSkin 统一解析：
+   * 来源 = 设置里的档位（自动/黑/白）+ 整体背景明度（唯一判定来源），
+   * 解析一次下发给整棵卡片树，避免「黑字配白色图标」这类不一致。
+   */
+  @Local inkTone: ScreensaverInkTone = 'light';
+  /** 是否启用文字轻投影兜底（复杂背景或对比度不足时）。 */
+  @Local inkHalo: boolean = false;
+
   // ============ 悬浮卡拖动状态（需求 B） ============
   /** 正在拖动的悬浮卡 id（'' = 没在拖）。 */
   @Local floatDragCardId: string = '';
@@ -329,8 +342,20 @@ export struct ScreenSaverPlayPage {
     }
     screenSaverGitViewModel.hydrateFromCache();
     this.refreshCanvasBackground();
+    this.refreshCardSkin();
     this.startBurnInTimer();
     this.startBatteryWatch();
+  }
+
+  /**
+   * 重新解析卡片皮肤（变更项 3.2）：文字墨色档 + 兜底投影开关。
+   * 判定来源是整体背景（色值亮度或背景图主色亮度的缓存），解析是纯读取，
+   * 不触发任何解码/取色——背景图就绪时由 refreshCanvasBackground 回调再刷一次。
+   */
+  private refreshCardSkin(): void {
+    const skin: ScreensaverCardSkin = screenSaverCurrentCardSkin();
+    this.inkTone = skin.tone;
+    this.inkHalo = skin.halo;
   }
 
   /**
@@ -356,6 +381,8 @@ export struct ScreenSaverPlayPage {
     this.canvasPixelKey = key;
     screenSaverCanvasBackground.ensure(uri, settings.canvasBlur).then((pixel: image.PixelMap | undefined): void => {
       this.canvasPixel = pixel;
+      // 背景图就绪后重算皮肤：图片背景的明度来自刚缓存的主色亮度（变更项 3.2）。
+      this.refreshCardSkin();
       ScreenSaverLogger.info(`canvas background applied: uri=${uri} blurred=${settings.canvasBlur}`);
     });
   }
@@ -365,6 +392,7 @@ export struct ScreenSaverPlayPage {
   onPageActiveChanged(): void {
     if (this.pageActive) {
       this.refreshCanvasBackground();
+      this.refreshCardSkin();
     }
   }
 
@@ -1337,7 +1365,12 @@ export struct ScreenSaverPlayPage {
   emptyState() {
     Column({ space: 10 }) {
       Column() {
-        ScreensaverClockCard({ card: this.fallbackCard, cardMode: 'play' })
+        ScreensaverClockCard({
+          card: this.fallbackCard,
+          cardMode: 'play',
+          cardTone: this.inkTone,
+          cardHalo: this.inkHalo
+        })
       }
       .width('100%')
       .height(158)
@@ -1571,21 +1604,29 @@ export struct ScreenSaverPlayPage {
    * 防烧屏 translate、点击/长按/触摸手势。
    */
   /**
-   * 该卡片是否需要「卡面填充」（变更项 1 / 变更项 4）：
-   *   · 时钟卡返回 false —— 纯文字浮层，背景完全透明；
-   *   · 相册 / 视频卡返回 false —— 变更项 4 要求 letterbox 区域**全透明**，
-   *     露出的必须是屏保整体背景；如果卡片自己有一层近乎黑的卡面
-   *     （旧 cardSurface #0D0D10），透明黑边就会被这层卡面「接住」而看起来仍是黑边。
-   *   · 其余卡片（Git/天气/入口）仍用统一卡面。
-   * 描边与填充解耦：相册/视频仍保留 1vp 细描边（边界可辨），只有时钟两者都不要。
+   * 该卡片单元格的**圆角裁剪策略**（变更项 1/2 的逐类说明）。
+   *
+   * 变更项 1 已确认：所有卡片的「卡面底色块 + 1vp 描边」统一移除（全透明），
+   * 原先由卡面/描边承担的「圆角裁剪」按下表处理：
+   *   · 相册卡：容器不裁剪圆角（0）——内容由渲染层按真实比例放进
+   *     「紧贴内容」的圆角容器（圆角 = cardRadius 10vp），
+   *     未铺满时圆角落在画面四角，铺满时与卡片圆角一致（已确认方案）；
+   *   · 视频卡：容器同样不裁剪（0），封面帧/播放画面走与相册一致的圆角容器；
+   *   · 其余卡（时钟/天气/入口/Git）：保留 cardRadius 圆角裁剪作为溢出保护，
+   *     无背景色后该裁剪在静止态不可见（文字与图形都在内边距以内）。
+   * 另外所有卡片都保留 `.clip(true)`：即使圆形裁剪为 0，
+   * 内容仍被限制在卡片边界内，不会因去边框而溢出。
    */
-  private cardHasFill(card: ScreensaverCardInstance): boolean {
-    return card.cardType !== 'clock' && card.cardType !== 'photo' && card.cardType !== 'video';
+  private cardClipRadius(card: ScreensaverCardInstance): number {
+    if (card.cardType === 'photo' || card.cardType === 'video') {
+      return 0;
+    }
+    return SCREEN_SAVER_METRICS.cardRadius;
   }
 
-  /** 该卡片是否需要 1vp 细描边：除时钟（全透明浮层）外都保留。 */
-  private cardHasBorder(card: ScreensaverCardInstance): boolean {
-    return card.cardType !== 'clock';
+  /** 当前墨色档的调色板（停用占位等页面级卡片文字与卡片内部同一来源）。 */
+  private inkPalette(): ScreensaverCardPalette {
+    return screenSaverCardPalette(this.inkTone);
   }
 
   @Builder
@@ -1596,17 +1637,18 @@ export struct ScreenSaverPlayPage {
         Column({ space: 4 }) {
           Text(screenSaverCardTypeName(card.cardType))
             .fontSize(13)
-            .fontColor(SCREEN_SAVER_COLORS.textSecondary)
+            .fontColor(this.inkPalette().textSecondary)
           Text('已停用')
             .fontSize(11)
-            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+            .fontColor(this.inkPalette().textTertiary)
         }
         .width('100%')
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
+        // 虚线框只在编辑态显示（编辑辅助元素；屏保展示态保持纯净无框线）。
         .border({
-          width: 1,
+          width: this.editMode ? 1 : 0,
           color: '#33FFFFFF',
           radius: SCREEN_SAVER_METRICS.cardRadius,
           style: BorderStyle.Dashed
@@ -1616,6 +1658,8 @@ export struct ScreenSaverPlayPage {
           card: card,
           cardMode: this.editMode ? 'edit' : 'play',
           cardActive: this.pageActive && !this.editMode,
+          cardTone: this.inkTone,
+          cardHalo: this.inkHalo,
           onRequestConfig: (): void => {
             // 卡片内部按钮（视频「重选」/ Git「重试」）→ 打开「这张卡片」的设置面板。
             // 显式传 cardId，不再经过 selectedCardId 中转（缺陷 1 的同类隐患）。
@@ -1737,16 +1781,10 @@ export struct ScreenSaverPlayPage {
     }
     .width('100%')
     .height('100%')
-    // 卡面与描边：除时钟卡外统一「卡面 + 细描边 + 圆角」（缺陷 2 的静态对比方案）。
-    // 时钟卡为全透明纯文字浮层（变更项 1）；
-    // 相册/视频卡不填卡面（变更项 4：letterbox 全透明露出整体背景），但保留细描边。
-    .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
-    .backgroundColor(this.cardHasFill(card) ? SCREEN_SAVER_COLORS.cardSurface : Color.Transparent)
-    .border({
-      width: this.cardHasBorder(card) ? 1 : 0,
-      color: SCREEN_SAVER_COLORS.cardHairline,
-      radius: SCREEN_SAVER_METRICS.cardRadius
-    })
+    // 变更项 1/3.1：所有卡片统一「无卡面底色、无描边、无阴影/发光/遮罩」。
+    // 圆角裁剪策略见 cardClipRadius（相册/视频不裁剪，内容自行定形；其余保留作溢出保护）。
+    .borderRadius(this.cardClipRadius(card))
+    .backgroundColor(Color.Transparent)
     .clip(true)
     // 播放态：卡片自身 Transparent，触摸透传给整页（点击唤胶囊）；
     // 编辑态：Default，卡片自己接触摸（拖动/选中）。

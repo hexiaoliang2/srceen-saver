@@ -89,6 +89,37 @@ export function screenSaverDecideFit(contentWidth: number, contentHeight: number
 }
 
 /**
+ * 计算「内容在容器里等比完全显示（contain）」后的显示尺寸（vp 或 px，单位随入参）。
+ *
+ * 用途（变更项 2）：相册/视频卡片在渲染层把内容放进一个「紧贴内容」的容器，
+ * 再对这个容器做圆角裁剪——这样圆角落在**内容自身的四角**上，
+ * 而不是落在卡片四角（letterbox 留白区域的角不会出现直角/黑角）。
+ *
+ * 规则：
+ *   · 内容是宽图（ratio ≥ 容器比例）→ 宽度铺满，高度按比例；
+ *   · 内容是窄图 → 高度铺满，宽度按比例；
+ *   · 任一入参非法（≤0）→ 原样返回容器尺寸（调用方按 Contain 兜底渲染）。
+ * 绝不放大以外的东西：返回值一定 ≤ 容器尺寸，不会产生裁切。
+ */
+export function screenSaverContainSize(containerWidth: number, containerHeight: number,
+  contentRatio: number): ScreenSaverFitSize {
+  if (containerWidth <= 0 || containerHeight <= 0 || contentRatio <= 0 || !Number.isFinite(contentRatio)) {
+    const fallback: ScreenSaverFitSize = {
+      width: containerWidth > 0 ? containerWidth : 0,
+      height: containerHeight > 0 ? containerHeight : 0
+    };
+    return fallback;
+  }
+  const containerRatio = containerWidth / containerHeight;
+  if (contentRatio >= containerRatio) {
+    const wide: ScreenSaverFitSize = { width: containerWidth, height: containerWidth / contentRatio };
+    return wide;
+  }
+  const tall: ScreenSaverFitSize = { width: containerHeight * contentRatio, height: containerHeight };
+  return tall;
+}
+
+/**
  * 计算解码尺寸（px）：把原图**等比缩到刚好放进卡片显示区**，并夹住长边上限。
  *
  * 三条硬约束：

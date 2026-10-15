@@ -27,6 +27,7 @@
 
 import { common } from '@kit.AbilityKit';
 import { screenSaverTicker, ScreenSaverTickListener } from '../common/Ticker';
+import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
 import {
   screenSaverFormatDate,
@@ -44,21 +45,9 @@ import {
   SCREEN_SAVER_CLOCK_SMALL_FONT,
   ScreensaverCardDensity,
   ScreensaverCardInstance,
-  ScreensaverCardMode
+  ScreensaverCardMode,
+  ScreensaverInkTone
 } from '../model/ConfigModels';
-
-/**
- * 时钟文字的可读性光晕（变更项 1，实现侧方案，待确认）。
- * 只作用于文字本身：radius 6px 的深色模糊 + 1px 下偏移，
- * 让浅色文字压在浅色照片/视频画面上时仍可辨认。
- * 明确**不是**卡片底色/边框/遮罩，也不做实时模糊——卡片依旧全透明。
- */
-const SCREEN_SAVER_CLOCK_TEXT_SHADOW: ShadowOptions = {
-  radius: 6,
-  color: '#CC000000',
-  offsetX: 0,
-  offsetY: 1
-};
 
 /**
  * 一次刷新计算出的完整排版方案：
@@ -78,6 +67,13 @@ interface ScreenSaverClockFontPlan {
 export struct ScreensaverClockCard {
   @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
   @Param cardMode: ScreensaverCardMode = 'play';
+  /**
+   * 文字墨色档与投影兜底开关（变更项 3.2/3.3）。
+   * 由屏保页按「整体背景明度」统一解析后下发（同一来源）；
+   * 默认浅色（新手引导页等深色容器里直接用默认值）。
+   */
+  @Param cardTone: ScreensaverInkTone = 'light';
+  @Param cardHalo: boolean = false;
 
   /**
    * 当前尺寸对应的内容密度档（尺寸矩阵查表得到）。
@@ -300,26 +296,40 @@ export struct ScreensaverClockCard {
     return this.card.colSpan * this.card.rowSpan < 4;
   }
 
+  /** 当前墨色档的调色板（文字颜色与兜底投影色都从这里取，同一来源）。 */
+  private palette(): ScreensaverCardPalette {
+    return screenSaverCardPalette(this.cardTone);
+  }
+
+  /**
+   * 文字投影参数：halo=false 时 radius=0（无阴影，屏保静止态纯净）；
+   * halo=true 时按墨色档配深/浅投影，浅色文字压浅色画面时仍可辨认。
+   * 明确**不是**卡片底色/边框/遮罩，也不做实时模糊——卡片依旧全透明。
+   */
+  private textShadow(): ShadowOptions {
+    return screenSaverTextShadow(this.cardHalo, this.palette().halo);
+  }
+
   build() {
     Column() {
       // 主行：时间（或日期/农历）+ 可选的 AM/PM 小标
       Row({ space: 4 }) {
         Text(this.mainText)
           .fontSize(this.mainFont)
-          .fontColor('#F2F2F2')
+          .fontColor(this.palette().textPrimary)
           .fontWeight(FontWeight.Medium)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-          // 可读性方案（变更项 1，实现侧方案待确认）：文字自带深色光晕，
-          // 在任意背景上都可辨认；不引入底色/边框/模糊/遮罩，仍是全透明。
-          .textShadow(SCREEN_SAVER_CLOCK_TEXT_SHADOW)
+          // 可读性兜底（变更项 3.3）：复杂背景/对比度不足时才画投影；
+          // 不引入底色/边框/模糊/遮罩，仍是全透明。
+          .textShadow(this.textShadow())
         if (this.periodText.length > 0) {
           // AM/PM 贴着时间底部对齐（VerticalAlign.Bottom），像真实时钟
           Text(this.periodText)
             .fontSize(Math.max(10, this.mainFont * 0.28))
-            .fontColor('#B3B3B3')
+            .fontColor(this.palette().textSecondary)
             .maxLines(1)
-            .textShadow(SCREEN_SAVER_CLOCK_TEXT_SHADOW)
+            .textShadow(this.textShadow())
         }
       }
       .alignItems(VerticalAlign.Bottom)
@@ -328,12 +338,12 @@ export struct ScreensaverClockCard {
       if (this.subText.length > 0) {
         Text(this.subText)
           .fontSize(this.subFont)
-          .fontColor('#8C8C8C')
+          .fontColor(this.palette().textTertiary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 4 })
           .padding({ left: 2, right: 2 })
-          .textShadow(SCREEN_SAVER_CLOCK_TEXT_SHADOW)
+          .textShadow(this.textShadow())
       }
     }
     .width('100%')

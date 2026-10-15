@@ -29,22 +29,19 @@
  */
 
 import { ScreenSaverLogger } from '../common/Logger';
+import {
+  screenSaverCardPalette,
+  screenSaverTextShadow,
+  ScreensaverCardPalette,
+  ScreensaverWeatherArtPalette
+} from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
 import { screenSaverWeatherViewModel } from '../model/WeatherViewModel';
-import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode,
+import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode, ScreensaverInkTone,
   ScreensaverWeatherCondition } from '../model/ConfigModels';
 
 /** 数据源署名（Open-Meteo 条款要求的署名文案）。 */
 const WEATHER_ATTRIBUTION: string = '数据 Open-Meteo';
-
-// ---------- 装饰配色（实现侧方案，待确认；均为中性插画色，不取自第三方素材） ----------
-const WEATHER_ART_SUN: string = '#F2B75E';        // 太阳
-const WEATHER_ART_CLOUD: string = '#C8D2DC';      // 云（多云/阵雨/雪）
-const WEATHER_ART_CLOUD_DARK: string = '#A9B4C0'; // 云（阴/雷暴）
-const WEATHER_ART_RAIN: string = '#8FB7E8';       // 雨珠
-const WEATHER_ART_SNOW: string = '#E8F1FA';       // 雪点
-const WEATHER_ART_FOG: string = '#B9C3CC';        // 雾线
-const WEATHER_ART_BOLT: string = '#F2C14E';       // 闪电
 
 @ComponentV2
 export struct ScreensaverWeatherCard {
@@ -52,8 +49,30 @@ export struct ScreensaverWeatherCard {
   @Param cardMode: ScreensaverCardMode = 'play';
   /** 屏保在前台时为 true（后台不发起刷新）。 */
   @Param cardActive: boolean = true;
+  /**
+   * 文字/图标墨色档与投影兜底开关（变更项 3.2/3.3/3.4）。
+   * 由屏保页统一解析后下发（同一来源）；天气装饰素材随档位切换深浅两套。
+   * 默认浅色（设置面板等深色容器里直接用默认）。
+   */
+  @Param cardTone: ScreensaverInkTone = 'light';
+  @Param cardHalo: boolean = false;
   /** 请求打开配置面板（空态/失败态里点「去设置」时冒泡）。 */
   @Event onRequestConfig: () => void = (): void => {};
+
+  /** 当前墨色档的调色板（文字 + 装饰素材版本，同一来源）。 */
+  private palette(): ScreensaverCardPalette {
+    return screenSaverCardPalette(this.cardTone);
+  }
+
+  /** 装饰调色板（深浅背景两套，随墨色档切换）。 */
+  private artPalette(): ScreensaverWeatherArtPalette {
+    return this.palette().weather;
+  }
+
+  /** 文字投影参数（halo 关闭时 radius=0 = 不画）。 */
+  private textShadow(): ShadowOptions {
+    return screenSaverTextShadow(this.cardHalo, this.palette().halo);
+  }
 
   /** 当前尺寸对应的内容密度档（尺寸矩阵查表，直接读 card 跨度保证随尺寸刷新）。 */
   private density(): ScreensaverCardDensity {
@@ -182,9 +201,10 @@ export struct ScreensaverWeatherCard {
     Column({ space: 4 }) {
       Text(this.hintText())
         .fontSize(this.density() === 'minimal' ? 10 : 12)
-        .fontColor('#B3B3B3')
+        .fontColor(this.palette().textSecondary)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textShadow(this.textShadow())
       if (this.density() === 'full' && this.cardMode === 'edit') {
         Text('点此打开设置')
           .fontSize(11)
@@ -236,18 +256,18 @@ export struct ScreensaverWeatherCard {
 
   // ==================== 静态装饰（基础图形绘制，无第三方素材、无动画） ====================
 
-  /** 太阳：实心圆 + 内圈高光。 */
+  /** 太阳：实心圆 + 内圈高光（颜色随墨色档切换）。 */
   @Builder
   sunArt(size: number) {
     Stack() {
       Circle()
         .width(size)
         .height(size)
-        .fill(WEATHER_ART_SUN)
+        .fill(this.artPalette().sun)
       Circle()
         .width(size * 0.44)
         .height(size * 0.44)
-        .fill('#F9D9A0')
+        .fill(this.artPalette().sunCore)
         .position({ x: size * 0.28, y: size * 0.28 })
     }
     .width(size)
@@ -288,21 +308,21 @@ export struct ScreensaverWeatherCard {
         .width(size * 0.12)
         .height(size * 0.26)
         .borderRadius(size * 0.06)
-        .backgroundColor(WEATHER_ART_RAIN)
+        .backgroundColor(this.artPalette().rain)
         .rotate({ angle: 20 })
         .position({ x: size * 0.18, y: size * 0.30 })
       Row()
         .width(size * 0.12)
         .height(size * 0.26)
         .borderRadius(size * 0.06)
-        .backgroundColor(WEATHER_ART_RAIN)
+        .backgroundColor(this.artPalette().rain)
         .rotate({ angle: 20 })
         .position({ x: size * 0.46, y: size * 0.44 })
       Row()
         .width(size * 0.12)
         .height(size * 0.26)
         .borderRadius(size * 0.06)
-        .backgroundColor(WEATHER_ART_RAIN)
+        .backgroundColor(this.artPalette().rain)
         .rotate({ angle: 20 })
         .position({ x: size * 0.72, y: size * 0.28 })
     }
@@ -317,17 +337,17 @@ export struct ScreensaverWeatherCard {
       Circle()
         .width(size * 0.16)
         .height(size * 0.16)
-        .fill(WEATHER_ART_SNOW)
+        .fill(this.artPalette().snow)
         .position({ x: size * 0.18, y: size * 0.34 })
       Circle()
         .width(size * 0.16)
         .height(size * 0.16)
-        .fill(WEATHER_ART_SNOW)
+        .fill(this.artPalette().snow)
         .position({ x: size * 0.48, y: size * 0.52 })
       Circle()
         .width(size * 0.16)
         .height(size * 0.16)
-        .fill(WEATHER_ART_SNOW)
+        .fill(this.artPalette().snow)
         .position({ x: size * 0.74, y: size * 0.30 })
     }
     .width(size)
@@ -342,17 +362,17 @@ export struct ScreensaverWeatherCard {
         .width(size * 0.92)
         .height(size * 0.12)
         .borderRadius(size * 0.06)
-        .backgroundColor(WEATHER_ART_FOG)
+        .backgroundColor(this.artPalette().fog)
       Row()
         .width(size * 0.64)
         .height(size * 0.12)
         .borderRadius(size * 0.06)
-        .backgroundColor(WEATHER_ART_FOG)
+        .backgroundColor(this.artPalette().fog)
       Row()
         .width(size * 0.80)
         .height(size * 0.12)
         .borderRadius(size * 0.06)
-        .backgroundColor(WEATHER_ART_FOG)
+        .backgroundColor(this.artPalette().fog)
     }
     .width(size)
     .height(size)
@@ -367,7 +387,7 @@ export struct ScreensaverWeatherCard {
       .width(size * 0.42)
       .height(size * 0.62)
       .commands('M6 0 L14 0 L9 10 L15 10 L4 24 L7 12 L0 12 Z')
-      .fill(WEATHER_ART_BOLT)
+      .fill(this.artPalette().bolt)
   }
 
   /**
@@ -383,7 +403,7 @@ export struct ScreensaverWeatherCard {
         Stack() {
           this.sunArt(size * 0.5)
           Column() {
-            this.cloudArt(size * 0.72, WEATHER_ART_CLOUD)
+            this.cloudArt(size * 0.72, this.artPalette().cloud)
           }
           .width(size)
           .height(size)
@@ -394,11 +414,11 @@ export struct ScreensaverWeatherCard {
         .height(size)
       } else if (this.condition() === 'cloudy' || this.condition() === 'showers' ||
         this.condition() === 'snow') {
-        this.cloudArt(size, WEATHER_ART_CLOUD)
+        this.cloudArt(size, this.artPalette().cloud)
       } else if (this.condition() === 'overcast' || this.condition() === 'rain' ||
         this.condition() === 'drizzle' || this.condition() === 'freezing' ||
         this.condition() === 'thunder') {
-        this.cloudArt(size, WEATHER_ART_CLOUD_DARK)
+        this.cloudArt(size, this.artPalette().cloudDark)
       } else if (this.condition() === 'fog') {
         this.fogBars(size)
       }
@@ -432,9 +452,10 @@ export struct ScreensaverWeatherCard {
         this.weatherArt(this.artSize())
         Text(this.tempText())
           .fontSize(20)
-          .fontColor('#F2F2F2')
+          .fontColor(this.palette().textPrimary)
           .fontWeight(FontWeight.Medium)
           .maxLines(1)
+          .textShadow(this.textShadow())
       }
       .width('100%')
       .height('100%')
@@ -445,9 +466,10 @@ export struct ScreensaverWeatherCard {
         this.weatherArt(this.artSize())
         Text(this.tempText())
           .fontSize(26)
-          .fontColor('#F2F2F2')
+          .fontColor(this.palette().textPrimary)
           .fontWeight(FontWeight.Medium)
           .maxLines(1)
+          .textShadow(this.textShadow())
       }
       .justifyContent(FlexAlign.Center)
       .alignItems(VerticalAlign.Center)
@@ -463,14 +485,16 @@ export struct ScreensaverWeatherCard {
         Column({ space: 1 }) {
           Text(this.tempText())
             .fontSize(this.largeCanvas() ? 30 : 26)
-            .fontColor('#F2F2F2')
+            .fontColor(this.palette().textPrimary)
             .fontWeight(FontWeight.Medium)
             .maxLines(1)
+            .textShadow(this.textShadow())
           Text(screenSaverWeatherViewModel.description)
             .fontSize(11)
-            .fontColor('#B3B3B3')
+            .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .textShadow(this.textShadow())
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
@@ -478,8 +502,9 @@ export struct ScreensaverWeatherCard {
       .alignItems(VerticalAlign.Center)
       Text(this.rangeText())
         .fontSize(10)
-        .fontColor('#8C8C8C')
+        .fontColor(this.palette().textTertiary)
         .maxLines(1)
+        .textShadow(this.textShadow())
     }
     .width('100%')
     .height('100%')
@@ -508,43 +533,50 @@ export struct ScreensaverWeatherCard {
       Column({ space: 2 }) {
         Text(this.tempText())
           .fontSize(this.largeCanvas() ? 34 : 26)
-          .fontColor('#F2F2F2')
+          .fontColor(this.palette().textPrimary)
           .fontWeight(FontWeight.Medium)
           .maxLines(1)
+          .textShadow(this.textShadow())
         Text(screenSaverWeatherViewModel.description)
           .fontSize(12)
-          .fontColor('#B3B3B3')
+          .fontColor(this.palette().textSecondary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textShadow(this.textShadow())
         Text(this.cityLine())
           .fontSize(12)
-          .fontColor('#B3B3B3')
+          .fontColor(this.palette().textSecondary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 2 })
+          .textShadow(this.textShadow())
         Text(this.rangeText())
           .fontSize(11)
-          .fontColor('#8C8C8C')
+          .fontColor(this.palette().textTertiary)
           .maxLines(1)
+          .textShadow(this.textShadow())
         if (this.largeCanvas() && this.statsText().length > 0) {
           Text(this.statsText())
             .fontSize(11)
-            .fontColor('#8C8C8C')
+            .fontColor(this.palette().textTertiary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .textShadow(this.textShadow())
         }
         if (this.largeCanvas() && this.tomorrowText().length > 0) {
           Text(this.tomorrowText())
             .fontSize(11)
-            .fontColor('#8C8C8C')
+            .fontColor(this.palette().textTertiary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .textShadow(this.textShadow())
         }
         Text(WEATHER_ATTRIBUTION)
           .fontSize(9)
-          .fontColor('#6E6E73')
+          .fontColor(this.palette().textTertiary)
           .maxLines(1)
           .margin({ top: 2 })
+          .textShadow(this.textShadow())
       }
       .width('100%')
       .height('100%')

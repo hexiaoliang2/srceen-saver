@@ -27,13 +27,20 @@ import { ScreensaverVideoCard } from './VideoCardView';
 import { ScreensaverGitCard } from './GitCardView';
 import { ScreensaverWeatherCard } from './WeatherCardView';
 import { ScreensaverEntryCard } from './EntryCardView';
-import { ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
+import { ScreensaverCardInstance, ScreensaverCardMode, ScreensaverInkTone } from '../model/ConfigModels';
 
 @ComponentV2
 export struct ScreensaverCardHost {
   @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
   @Param cardMode: ScreensaverCardMode = 'play';
   @Param cardActive: boolean = true;
+  /**
+   * 卡片皮肤（变更项 3.2/3.3）：文字/图标墨色档 + 投影兜底开关。
+   * 屏保页按「整体背景明度」统一解析后下发（同一来源）；不改默认值时
+   * 卡片保持浅色观感（设置面板、首页预览等深色容器场景直接用默认）。
+   */
+  @Param cardTone: ScreensaverInkTone = 'light';
+  @Param cardHalo: boolean = false;
   @Event onRequestConfig: () => void = (): void => {};
 
   build() {
@@ -44,13 +51,17 @@ export struct ScreensaverCardHost {
       ScreensaverPhotoCard({
         card: this.card,
         cardMode: this.cardMode,
-        cardActive: this.cardActive
+        cardActive: this.cardActive,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo
       })
     } else if (this.card.cardType === 'video') {
       ScreensaverVideoCard({
         card: this.card,
         cardMode: this.cardMode,
         cardActive: this.cardActive,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo,
         onRequestConfig: (): void => {
           this.onRequestConfig();
         }
@@ -60,6 +71,8 @@ export struct ScreensaverCardHost {
         card: this.card,
         cardMode: this.cardMode,
         cardActive: this.cardActive,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo,
         onRequestConfig: (): void => {
           this.onRequestConfig();
         }
@@ -69,6 +82,8 @@ export struct ScreensaverCardHost {
         card: this.card,
         cardMode: this.cardMode,
         cardActive: this.cardActive,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo,
         onRequestConfig: (): void => {
           this.onRequestConfig();
         }
@@ -76,13 +91,17 @@ export struct ScreensaverCardHost {
     } else if (this.card.cardType === 'entry') {
       ScreensaverEntryCard({
         card: this.card,
-        cardMode: this.cardMode
+        cardMode: this.cardMode,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo
       })
     } else {
       // 默认（含 'clock'）：时钟卡片不需要 active/onRequestConfig 参数
       ScreensaverClockCard({
         card: this.card,
-        cardMode: this.cardMode
+        cardMode: this.cardMode,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo
       })
     }
   }

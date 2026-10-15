@@ -32,7 +32,8 @@ import {
   SCREEN_SAVER_CANVAS_COLORS,
   SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
   SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS,
-  ScreensaverCanvasColorOption
+  ScreensaverCanvasColorOption,
+  ScreensaverStringOption
 } from '../model/ConfigModels';
 
 /** 背景色选择列表：默认纯黑 + 24 个预设色（变更项 7）。 */
@@ -51,8 +52,20 @@ function screenSaverCanvasColorOptions(): ScreensaverCanvasColorOption[] {
 
 const CANVAS_COLOR_OPTIONS: ScreensaverCanvasColorOption[] = screenSaverCanvasColorOptions();
 
+/**
+ * 文字颜色三档（变更项 3.2）：黑色 / 白色 / 自动（默认）。
+ * value 与 ScreensaverTextToneMode 一一对应：auto=自动、dark=黑色、light=白色。
+ */
+const TEXT_TONE_OPTIONS: ScreensaverStringOption[] = [
+  { value: 'auto', label: '自动（默认）' },
+  { value: 'dark', label: '黑色' },
+  { value: 'light', label: '白色' }
+];
+
 /** 内置示例背景图的文件名（对应 resources/rawfile/sample_photos/ 下的自生成素材）。 */
 const CANVAS_SAMPLE_FILE: string = 'photo_landscape_4k.jpg';
+/** 内置示例背景图（暗色）：用于验证「较暗图片背景」下的自动文字色判定。 */
+const CANVAS_SAMPLE_DARK_FILE: string = 'photo_dark.jpg';
 
 @ComponentV2
 export struct ScreenSaverSettingsPage {
@@ -90,6 +103,34 @@ export struct ScreenSaverSettingsPage {
     screenSaverAppModel.save();
   }
 
+  // ==================== 文字与图标颜色（变更项 3.2/3.3） ====================
+
+  /** 切换文字色档位（三档：自动/黑色/白色），立即落盘、重启后恢复。 */
+  private setTextTone(value: string): void {
+    const settings = screenSaverAppModel.layout.settings;
+    if (value === 'dark') {
+      settings.textTone = 'dark';
+    } else if (value === 'light') {
+      settings.textTone = 'light';
+    } else {
+      settings.textTone = 'auto';
+    }
+    screenSaverAppModel.save();
+    this.toast(settings.textTone === 'auto' ? '已切换为自动（按整体背景明度）' : '已固定文字颜色档位');
+  }
+
+  /** 当前文字色档位的显示文案（右对齐的小字）。 */
+  private textToneLabel(): string {
+    const tone = screenSaverAppModel.layout.settings.textTone;
+    if (tone === 'dark') {
+      return '黑色';
+    }
+    if (tone === 'light') {
+      return '白色';
+    }
+    return '自动';
+  }
+
   /**
    * 选择本地图片作为背景（替代「桌面透视模糊」，原因见下方说明文案）。
    * 选完立即做一次**离屏模糊**并把结果缓存起来（screenSaverCanvasBackground），
@@ -125,6 +166,16 @@ export struct ScreenSaverSettingsPage {
    * 并立刻做一次离屏模糊（若开关打开）以便验证缓存复用。
    */
   private async useSampleCanvasImage(): Promise<void> {
+    await this.copySampleCanvasImage(CANVAS_SAMPLE_FILE);
+  }
+
+  /** 使用内置「暗色」示例图作为背景（验证较暗图片背景下的自动判定用）。 */
+  private async useDarkSampleCanvasImage(): Promise<void> {
+    await this.copySampleCanvasImage(CANVAS_SAMPLE_DARK_FILE);
+  }
+
+  /** 复制内置示例图到沙箱并设为背景（亮/暗两张共用同一条链路）。 */
+  private async copySampleCanvasImage(fileName: string): Promise<void> {
     const context = this.context();
     if (context === undefined) {
       return;
@@ -136,7 +187,7 @@ export struct ScreenSaverSettingsPage {
       } catch (mkdirError) {
         ScreenSaverLogger.info('canvas sample dir already ready');
       }
-      const targetPath = `${sampleDir}/${CANVAS_SAMPLE_FILE}`;
+      const targetPath = `${sampleDir}/${fileName}`;
       let exists = false;
       try {
         exists = fileIo.accessSync(targetPath);
@@ -144,7 +195,7 @@ export struct ScreenSaverSettingsPage {
         exists = false;
       }
       if (!exists) {
-        const content = await context.resourceManager.getRawFileContent(`sample_photos/${CANVAS_SAMPLE_FILE}`);
+        const content = await context.resourceManager.getRawFileContent(`sample_photos/${fileName}`);
         const file = fileIo.openSync(targetPath, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
         try {
           fileIo.writeSync(file.fd, content.buffer as ArrayBuffer);
@@ -430,6 +481,13 @@ export struct ScreenSaverSettingsPage {
                 .onClick((): void => {
                   void this.useSampleCanvasImage();
                 })
+              Text('暗示例')
+                .fontSize(13)
+                .fontColor(SCREEN_SAVER_COLORS.accent)
+                .margin({ left: 10 })
+                .onClick((): void => {
+                  void this.useDarkSampleCanvasImage();
+                })
               if (screenSaverAppModel.layout.settings.canvasImageUri.length > 0) {
                 Text('移除')
                   .fontSize(13)
@@ -461,6 +519,65 @@ export struct ScreenSaverSettingsPage {
               '因此这里提供「自选本地图片 + 一次性离屏模糊缓存」作为替代：不是实时桌面模糊，' +
               '换桌面壁纸后需要重新选图。⚠ 浅色背景会显著增加屏幕耗电（OLED 上等效点亮更多像素），' +
               '与「极低功耗」目标冲突，默认纯黑最省电。')
+              .fontSize(11)
+              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+              .width('100%')
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(10)
+          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+
+          // ---------- 文字与图标颜色（变更项 3.2/3.3/3.4） ----------
+          // 三档：黑色 / 白色 / 自动（默认）。自动 = 按屏保整体背景明度判定，
+          // 结果同时驱动卡片文字颜色与图标/装饰素材版本（同一来源）。
+          Column({ space: 8 }) {
+            Row() {
+              Column() {
+                Text('文字与图标颜色')
+                  .fontSize(14)
+                  .fontColor('#CCCCCC')
+                Text('自动 = 按屏保整体背景明度判定（默认）')
+                  .fontSize(11)
+                  .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                  .margin({ top: 2 })
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Text(this.textToneLabel())
+                .fontSize(13)
+                .fontColor(SCREEN_SAVER_COLORS.accent)
+            }
+            .width('100%')
+
+            Row({ space: 8 }) {
+              ForEach(TEXT_TONE_OPTIONS, (option: ScreensaverStringOption) => {
+                ScreenSaverChip({
+                  label: option.label,
+                  selected: screenSaverAppModel.layout.settings.textTone === option.value,
+                  onTap: (): void => {
+                    this.setTextTone(option.value);
+                  }
+                })
+              }, (option: ScreensaverStringOption): string => `tone_${option.value}`)
+            }
+            .width('100%')
+
+            ScreenSaverToggleRow({
+              label: '文字投影兜底',
+              tip: '背景为图片或对比度不足 4.5:1 时，为文字加一层轻投影保证可读',
+              isOn: screenSaverAppModel.layout.settings.textHalo,
+              onChange: (value: boolean): void => {
+                screenSaverAppModel.layout.settings.textHalo = value;
+                screenSaverAppModel.save();
+              }
+            })
+
+            Text('判定说明：整体背景为纯色时用其色值算 WCAG 相对亮度；背景为图片/模糊图时' +
+              '取整图主色（≈主要区域平均色）算亮度，取样在背景图就绪时执行一次并缓存。' +
+              '自动档阈值取黑白文字的对比度交叉点（相对亮度 0.179），保证纯色背景下 ' +
+              '所选文字色对比度 ≥ 4.5:1（WCAG AA 正文下限）；图片背景局部像素不可预知，' +
+              '因此启用轻投影兜底。装饰素材（天气图标等）随档位切换深浅两套。')
               .fontSize(11)
               .fontColor(SCREEN_SAVER_COLORS.textTertiary)
               .width('100%')

@@ -52,6 +52,19 @@ export type ScreensaverWeatherCondition = 'clear' | 'partly' | 'cloudy' | 'overc
 /** 半模态面板种类：当前弹出的是哪个设置面板。 */
 export type SheetKind = 'none' | 'clock' | 'photo' | 'video' | 'git' | 'weather' | 'entry' | 'albumSource';
 
+/**
+ * 文字颜色档位（变更项 3.2）：'auto' 按整体背景明度自动判定（默认）；
+ * 'dark' 手动固定深色文字；'light' 手动固定浅色文字。随布局持久化。
+ */
+export type ScreensaverTextToneMode = 'auto' | 'dark' | 'light';
+
+/**
+ * 自动判定的结果（墨色调）：'light' = 使用浅色文字（背景偏深）；
+ * 'dark' = 使用深色文字（背景偏浅）。判定来源是整体背景明度（唯一来源），
+ * 同时驱动文字颜色与图标/装饰素材版本（变更项 3.2/3.4）。
+ */
+export type ScreensaverInkTone = 'light' | 'dark';
+
 // ---------- 网格与断点常量 ----------
 /** 持久化数据的版本号：读盘时发现版本不符可做迁移或重置。 */
 export const SCREEN_SAVER_SCHEMA_VERSION: number = 3;
@@ -198,7 +211,7 @@ export interface ScreensaverCanvasColorOption {
 /** 默认背景：纯黑（OLED 省电基准，也是变更项 7 的要求）。 */
 export const SCREEN_SAVER_DEFAULT_CANVAS_COLOR: string = '#000000';
 
-/** 24 个预设背景色（需求正文给定，顺序与需求一致）。 */
+/** 24 个预设背景色（需求正文给定，顺序与需求一致）+ 纯白/克莱因蓝（变更项 3.5 验证背景）。 */
 export const SCREEN_SAVER_CANVAS_COLORS: ScreensaverCanvasColorOption[] = [
   { value: '#A3B5C0', label: '雾灰蓝' },
   { value: '#9FB6C4', label: '浅钢蓝' },
@@ -223,7 +236,9 @@ export const SCREEN_SAVER_CANVAS_COLORS: ScreensaverCanvasColorOption[] = [
   { value: '#E8DCC8', label: '亚麻' },
   { value: '#D5C7B8', label: '浅沙' },
   { value: '#D9D9D9', label: '浅灰' },
-  { value: '#F7F7F5', label: '云白' }
+  { value: '#F7F7F5', label: '云白' },
+  { value: '#FFFFFF', label: '纯白' },
+  { value: '#002FA7', label: '克莱因蓝' }
 ];
 
 /** 预设色里是否包含某个色值（读盘数据校验用）。 */
@@ -374,6 +389,9 @@ export class ScreensaverSettings {
   @Trace canvasColor: string = '#000000';     // 背景色（默认纯黑；预设色见 CanvasBackground）
   @Trace canvasImageUri: string = '';         // 自选背景图片（空 = 只用色值）
   @Trace canvasBlur: boolean = false;         // 背景图片是否做一次性离屏模糊
+  // ---------- 文字与装饰可读性（变更项 3.2/3.3） ----------
+  @Trace textTone: ScreensaverTextToneMode = 'auto'; // 文字颜色档位（默认自动）
+  @Trace textHalo: boolean = true;            // 复杂背景下的文字投影兜底开关
 }
 
 /** 布局根节点：版本号 + 全局设置 + 卡片数组。整个持久化文件的内存形态。 */
@@ -511,6 +529,8 @@ export interface ScreensaverRawSettings {
   canvasColor?: string;
   canvasImageUri?: string;
   canvasBlur?: boolean;
+  textTone?: string;
+  textHalo?: boolean;
   dimEnabled?: boolean;
   dimDelaySec?: number;
   dimBrightness?: number;

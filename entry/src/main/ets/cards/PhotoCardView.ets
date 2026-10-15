@@ -34,19 +34,22 @@
 
 import { image } from '@kit.ImageKit';
 import { ScreenSaverLogger } from '../common/Logger';
-import { screenSaverDarkenHex, screenSaverImageLoader, screenSaverVpToPx } from '../common/ImageLoader';
+import { screenSaverImageLoader, screenSaverVpToPx, ScreenSaverFittedDecode } from '../common/ImageLoader';
 import { screenSaverTicker } from '../common/Ticker';
 import { screenSaverNetProbe } from '../common/NetProbe';
 import { screenSaverMediaAccess, screenSaverPhotoAccessFlag } from '../common/MediaAccess';
 import { screenSaverMotionDuration, SCREEN_SAVER_MOTION_PHOTO_FADE_MS } from '../common/Motion';
-import { ScreenSaverFitBars } from '../common/ContentFit';
+import { SCREEN_SAVER_METRICS } from '../common/ScreenSaverStyle';
+import { screenSaverContainSize, ScreenSaverFitBars } from '../common/ContentFit';
+import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
 import {
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
   SCREEN_SAVER_PHOTO_RECENT_DEDUP,
   ScreensaverCardDensity,
   ScreensaverCardInstance,
-  ScreensaverCardMode
+  ScreensaverCardMode,
+  ScreensaverInkTone
 } from '../model/ConfigModels';
 
 // 尺寸变化后防抖 300ms 才重新解码（编辑模式连续拖尺寸时不狂解码）。
@@ -55,22 +58,6 @@ import {
 const SCREEN_SAVER_REFIT_DEBOUNCE_MS: number = 300;
 // 位图延迟释放时间：给淡入动画留出引用窗口。
 const SCREEN_SAVER_DEFERRED_RELEASE_MS: number = 100;
-// 占位底色：中性深灰（还没提取到照片主色时用）。
-const SCREEN_SAVER_PLACEHOLDER_NEUTRAL: string = '#1A1A1E';
-// 占位底色按照片主色调暗的系数。
-const SCREEN_SAVER_PLACEHOLDER_DARKEN: number = 0.45;
-/**
- * 黑边（letterbox/pillarbox）区域的处理（变更项 4，已改为**全透明**）。
- *
- * 规则：图片一律 `ImageFit.Contain`（等比完整显示、不裁切）。
- * 比例不一致时 Contain 会在卡片里留出 letterbox/pillarbox 区域——
- * 该区域现在**完全透明**（不再填纯黑），露出的是屏保整体背景
- * （默认纯黑，也可以是设置里的预设色或自定义图片背景）。
- *
- * 为什么改：需求要求黑边透明；透明后「卡片边界」在浅色背景下会变弱，
- * 观察与建议见交付文档（保留 1vp 细描边作为边界，必要时可加投影）。
- * 仅「还没出图」的加载态保留照片主色占位（它不是黑边，是占位底色）。
- */
 
 @ComponentV2
 export struct ScreensaverPhotoCard {
@@ -78,6 +65,12 @@ export struct ScreensaverPhotoCard {
   @Param cardMode: ScreensaverCardMode = 'play';
   /** 屏保在前台时为 true，后台时暂停轮播（省电流控）。 */
   @Param cardActive: boolean = true;
+  /**
+   * 文字墨色档与投影兜底开关（变更项 3.2/3.3）。
+   * 由屏保页统一解析后下发（同一来源）；默认浅色（设置面板等深色容器里直接用默认）。
+   */
+  @Param cardTone: ScreensaverInkTone = 'light';
+  @Param cardHalo: boolean = false;
   /** 手动切图信号：父组件改这个数字（+1），编辑态预览就切下一张。 */
   @Param manualAdvanceSeed: number = 0;
 
@@ -95,15 +88,20 @@ export struct ScreensaverPhotoCard {
   @Local incomingPixel: image.PixelMap | undefined = undefined; // 淡入中的新照片（也兼作预解码缓存）
   @Local fadeOpacity: number = 0;            // 新照片的透明度（0→1 淡入）
   @Local placeholderVisible: boolean = true; // 是否显示「加载中…」
-  @Local placeholderColor: string = SCREEN_SAVER_PLACEHOLDER_NEUTRAL; // 占位底色（照片主色调暗）
   @Local infoText: string = '';              // 左下角信息（拍摄日期/文件名）
   @Local deniedVisible: boolean = false;     // 「无相册权限」占位
   @Local emptyVisible: boolean = false;      // 「还没有照片」占位
   /**
    * 当前照片的适配结论（变更项 4）：none 无黑边 / horizontal 上下黑边 / vertical 左右黑边。
-   * 由 screenSaverDecideFit（ContentFit.ets）算出来，用于日志与最终底色选择。
+   * 由 screenSaverDecideFit（ContentFit.ets）算出来，用于日志与验证。
    */
   @Local contentBars: ScreenSaverFitBars = 'none';
+  /**
+   * 内容宽高比（宽/高，0 = 未知）——变更项 2 的核心输入：
+   * 渲染层按它把照片放进「紧贴内容」的圆角容器（四角圆角落在画面上）。
+   */
+  @Local currentRatio: number = 0;
+  @Local incomingRatio: number = 0;
 
   // ---------- 内部流水线状态（不需要触发 UI 刷新，普通字段即可） ----------
   private playList: string[] = [];      // 有效照片 uri 列表
@@ -347,13 +345,13 @@ export struct ScreensaverPhotoCard {
       return;
     }
     const uri = this.playList[this.cursor];
-    const map = await this.decodeUri(uri);
+    const decoded = await this.decodeUri(uri);
     if (gen !== this.generation) {
       // 期间发生了重置：本次结果作废，立刻释放防止泄漏
-      this.releaseMap(map);
+      this.releaseMap(decoded?.pixelMap);
       return;
     }
-    if (map === undefined) {
+    if (decoded === undefined) {
       // 这张坏了：记入排除名单，挑下一张重试
       this.noteBroken(uri);
       const nextIndex = this.pickNextIndex();
@@ -365,7 +363,8 @@ export struct ScreensaverPhotoCard {
       return;
     }
     const retire = this.currentPixel;
-    this.currentPixel = map;
+    this.currentPixel = decoded.pixelMap;
+    this.currentRatio = decoded.decision.contentRatio;
     this.releaseMapDeferred(retire);
     this.fadeOpacity = 0;
     this.placeholderVisible = false;
@@ -445,19 +444,20 @@ export struct ScreensaverPhotoCard {
       return;
     }
     const uri = this.playList[index];
-    const map = await this.decodeUri(uri);
+    const decoded = await this.decodeUri(uri);
     if (gen !== this.generation) {
-      this.releaseMap(map);
+      this.releaseMap(decoded?.pixelMap);
       return;
     }
-    if (map === undefined) {
+    if (decoded === undefined) {
       this.noteBroken(uri);
       void this.preloadNext(attempt + 1);
       return;
     }
     // 替换旧的预解码图（只保留一张预解码）
     const retire = this.incomingPixel;
-    this.incomingPixel = map;
+    this.incomingPixel = decoded.pixelMap;
+    this.incomingRatio = decoded.decision.contentRatio;
     this.pendingNextIndex = index;
     this.releaseMapDeferred(retire);
   }
@@ -467,6 +467,7 @@ export struct ScreensaverPhotoCard {
     const retire = this.retiringMap;
     this.retiringMap = undefined;
     this.currentPixel = targetPixel;
+    this.currentRatio = this.incomingRatio;
     this.cursor = targetIndex;
     this.incomingPixel = undefined;
     this.fadeOpacity = 0;
@@ -544,16 +545,17 @@ export struct ScreensaverPhotoCard {
   /** 按新尺寸重载当前这张（不换照片、不算 attempt）。 */
   private async reloadCurrent(gen: number): Promise<void> {
     const uri = this.playList[this.cursor];
-    const map = await this.decodeUri(uri);
+    const decoded = await this.decodeUri(uri);
     if (gen !== this.generation) {
-      this.releaseMap(map);
+      this.releaseMap(decoded?.pixelMap);
       return;
     }
-    if (map === undefined) {
+    if (decoded === undefined) {
       return;
     }
     const retire = this.currentPixel;
-    this.currentPixel = map;
+    this.currentPixel = decoded.pixelMap;
+    this.currentRatio = decoded.decision.contentRatio;
     this.releaseMapDeferred(retire);
     this.placeholderVisible = false;
     void this.preloadNext(0);
@@ -566,11 +568,10 @@ export struct ScreensaverPhotoCard {
    *   1. 容器像素 = 卡片实际像素（cardW/cardH → px），即「容器实际显示像素」；
    *   2. decodeFitted 读原图宽高，用 screenSaverFittedSize 算出等比放进容器的解码尺寸
    *      （绝不裁切、绝不放大、长边 ≤ 2160 防内存）；
-   *   3. screenSaverDecideFit 给出「是否该有黑边、在哪一侧」的结论，写入
-   *      contentBars 并打日志——黑边本身由渲染层 ImageFit.Contain + 底色产生。
-   * 解码成功后顺便提取主色，把「加载中」占位底色调成这张照片的颜色调暗。
+   *   3. screenSaverDecideFit 给出「是否该有黑边、在哪一侧」的结论并打日志；
+   *   4. 返回解码结果（调用方从 decision 里取内容比例，用于变更项 2 的圆角容器）。
    */
-  private async decodeUri(uri: string): Promise<image.PixelMap | undefined> {
+  private async decodeUri(uri: string): Promise<ScreenSaverFittedDecode | undefined> {
     if (this.excludedUris.indexOf(uri) >= 0) {
       return undefined;
     }
@@ -584,11 +585,48 @@ export struct ScreensaverPhotoCard {
     ScreenSaverLogger.info(`photo fit uri=${uri} card=${containerW}x${containerH}px content=` +
       `${decoded.contentWidth}x${decoded.contentHeight}px ratio=${decoded.decision.contentRatio.toFixed(3)}/` +
       `${decoded.decision.cardRatio.toFixed(3)} bars=${decoded.decision.bars}`);
-    const avg = await screenSaverImageLoader.extractMainColor(decoded.pixelMap);
-    if (avg !== undefined) {
-      this.placeholderColor = screenSaverDarkenHex(avg, SCREEN_SAVER_PLACEHOLDER_DARKEN);
-    }
-    return decoded.pixelMap;
+    return decoded;
+  }
+
+  /** 当前墨色档的调色板（文字颜色与兜底投影色都从这里取，同一来源）。 */
+  private palette(): ScreensaverCardPalette {
+    return screenSaverCardPalette(this.cardTone);
+  }
+
+  /** 一般文字的投影参数（halo 关闭时 radius=0 = 不画）。 */
+  private textShadow(): ShadowOptions {
+    return screenSaverTextShadow(this.cardHalo, this.palette().halo);
+  }
+
+  /**
+   * 信息条文字的投影：信息条压在**照片**上（内容像素不可预知，属复杂背景），
+   * 因此恒启用轻投影（radius 4px，比正文投影更收敛），保证日期可读。
+   */
+  private infoTextShadow(): ShadowOptions {
+    const options: ShadowOptions = {
+      radius: 4,
+      color: this.palette().halo,
+      offsetX: 0,
+      offsetY: 1
+    };
+    return options;
+  }
+
+  /**
+   * 内容容器宽（vp）：按照片真实比例等比放进卡片（变更项 2）。
+   * 比例未知（还没解码出图）时返回整卡宽（Contain 兜底渲染）。
+   */
+  private contentWidth(ratio: number): number {
+    const width = this.cardW > 0 ? this.cardW : 320;
+    const height = this.cardH > 0 ? this.cardH : 480;
+    return screenSaverContainSize(width, height, ratio).width;
+  }
+
+  /** 内容容器高（vp），规则同 contentWidth。 */
+  private contentHeight(ratio: number): number {
+    const width = this.cardW > 0 ? this.cardW : 320;
+    const height = this.cardH > 0 ? this.cardH : 480;
+    return screenSaverContainSize(width, height, ratio).height;
   }
 
   /** 解码目标宽（px）：卡片实际宽，未测得时用 320vp 默认值。 */
@@ -692,58 +730,70 @@ export struct ScreensaverPhotoCard {
 
   /**
    * 界面结构（Stack 分层，从底到顶）：
-   *   1. 底色：还没出图时用照片主色调暗（加载瞬间不刺眼）；出图后透明
-   *      ——此时 Contain 留出的 letterbox/pillarbox 区域会露出整体背景（变更项 4）
-   *   2. 当前照片（**Contain：等比完整显示，不裁切**）
-   *   3. 淡入中的新照片（opacity 由动画驱动，同样 Contain）
-   *   4. 「加载中…」/「还没有照片」/「无相册访问权限」占位文字
-   *   5. 左下角信息条（拍摄日期/文件名）
+   *   1. 照片（**Contain：等比完整显示，不裁切**）放进「内容容器」：
+   *      容器尺寸 = 按照片真实比例等比放进卡片（变更项 2），
+   *      圆角 = 卡片圆角（SCREEN_SAVER_METRICS.cardRadius，10vp）并裁剪——
+   *      内容未铺满时圆角落在画面四角上，铺满时与卡片圆角一致（已确认方案）；
+   *   2. 淡入中的新照片（opacity 由动画驱动，同样容器 + 圆角）；
+   *   3. 「加载中…」/「还没有照片」/「无相册访问权限」占位文字；
+   *   4. 左下角信息条（拍摄日期/文件名；变更项 3.1：底色全透明，靠轻投影保证可读）。
    *
-   * 关于「黑边由谁产生」：内容与卡片比例一致时 Contain 正好铺满（无黑边）；
-   * 不一致时 Contain 会等比缩小到完整可见，多出来的部分**完全透明**（变更项 4），
-   * 露出屏保整体背景。
+   * 变更项 3.1：卡片无任何黑色底块——加载占位不再铺深色底、信息条不再铺 45% 黑底，
+   * 未铺满区域的留白全透明，露出屏保整体背景。
    */
   build() {
     Stack() {
-      Column()
-        .width('100%')
-        .height('100%')
-        // 变更项 4：出图后底色透明（letterbox 区域全透明，露出整体背景）；
-        // 未出图时仍用照片主色占位，避免加载瞬间的闪烁。
-        .backgroundColor(this.currentPixel === undefined ? this.placeholderColor : Color.Transparent)
       if (this.currentPixel !== undefined) {
-        Image(this.currentPixel)
-          .width('100%')
-          .height('100%')
-          .objectFit(ImageFit.Contain)
+        Stack() {
+          Image(this.currentPixel)
+            .width('100%')
+            .height('100%')
+            .objectFit(ImageFit.Contain)
+        }
+        .width(this.contentWidth(this.currentRatio))
+        .height(this.contentHeight(this.currentRatio))
+        .align(Alignment.Center)
+        .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
+        .clip(true)
       }
       if (this.incomingPixel !== undefined) {
-        Image(this.incomingPixel)
-          .width('100%')
-          .height('100%')
-          .objectFit(ImageFit.Contain)
-          .opacity(this.fadeOpacity)
+        Stack() {
+          Image(this.incomingPixel)
+            .width('100%')
+            .height('100%')
+            .objectFit(ImageFit.Contain)
+        }
+        .width(this.contentWidth(this.incomingRatio))
+        .height(this.contentHeight(this.incomingRatio))
+        .align(Alignment.Center)
+        .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
+        .clip(true)
+        .opacity(this.fadeOpacity)
       }
       if (this.placeholderVisible && !this.deniedVisible && !this.emptyVisible && this.density() !== 'minimal') {
         Text('加载中…')
           .fontSize(12)
-          .fontColor('#8C8C8C')
+          .fontColor(this.palette().textTertiary)
+          .textShadow(this.textShadow())
       }
       if (this.emptyVisible && this.density() !== 'minimal') {
         Column({ space: 4 }) {
           Text('还没有照片')
             .fontSize(13)
-            .fontColor('#B3B3B3')
+            .fontColor(this.palette().textSecondary)
+            .textShadow(this.textShadow())
           Text('在配置中选择相册来源')
             .fontSize(11)
-            .fontColor('#6E6E73')
+            .fontColor(this.palette().textTertiary)
+            .textShadow(this.textShadow())
         }
       }
       if (this.deniedVisible && this.density() !== 'minimal') {
         Column({ space: 6 }) {
           Text('无相册访问权限')
             .fontSize(13)
-            .fontColor('#B3B3B3')
+            .fontColor(this.palette().textSecondary)
+            .textShadow(this.textShadow())
           // 「去开启」按钮只在编辑态显示（播放态不可交互，保持纯净）
           if (this.cardMode === 'edit') {
             Column() {
@@ -766,13 +816,14 @@ export struct ScreensaverPhotoCard {
         Row() {
           Text(this.infoText)
             .fontSize(this.density() === 'compact' ? 9 : 10)
-            .fontColor('#D0D0D0')
+            .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+            // 变更项 3.1/3.3：信息条底色全透明；文字压在照片上，恒用轻投影兜底。
+            .textShadow(this.infoTextShadow())
         }
         .width('100%')
         .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-        .backgroundColor('#73000000')
         .align(Alignment.BottomStart)
       }
     }

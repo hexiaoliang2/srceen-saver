@@ -27,8 +27,16 @@
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverVideoThumb } from '../common/VideoThumb';
+import { SCREEN_SAVER_METRICS } from '../common/ScreenSaverStyle';
+import { screenSaverContainSize, screenSaverFittedSize, ScreenSaverFitSize } from '../common/ContentFit';
+import {
+  screenSaverCardPalette,
+  screenSaverTextShadow,
+  ScreensaverCardPalette
+} from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
-import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
+import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode,
+  ScreensaverInkTone } from '../model/ConfigModels';
 
 @ComponentV2
 export struct ScreensaverVideoCard {
@@ -36,6 +44,12 @@ export struct ScreensaverVideoCard {
   @Param cardMode: ScreensaverCardMode = 'play';
   /** 屏保在前台时为 true：后台时立即停止播放（省电流控）。 */
   @Param cardActive: boolean = true;
+  /**
+   * 文字/图标墨色档与投影兜底开关（变更项 3.2/3.3）。
+   * 由屏保页统一解析后下发（同一来源）；默认浅色（设置面板等深色容器里直接用默认）。
+   */
+  @Param cardTone: ScreensaverInkTone = 'light';
+  @Param cardHalo: boolean = false;
   /**
    * 是否处于「设置面板置预览」：预览也需要能验证视频本身（变更项 3）。
    * 为 true 时允许在 cardMode==='edit' 下播放，入口就是面板里的「播放视频」开关。
@@ -58,6 +72,15 @@ export struct ScreensaverVideoCard {
   @Local unavailable: boolean = false;  // 视频不可用（被删/无权限）
   @Local emptyVisible: boolean = true;  // 是否显示「未选择视频」占位
   @Local prepared: boolean = false;     // Video 组件是否已就绪（onPrepared 回调）
+  /**
+   * 视频原始宽高比（宽/高，0 = 未知）。
+   * 变更项 2（视频统一处理）：画面放进「紧贴内容」的圆角容器，
+   * 未铺满时内容四角为圆角、铺满时与卡片圆角一致（同一数值）。
+   */
+  @Local videoRatio: number = 0;
+  /** 卡片实际宽高（vp），内容容器尺寸换算用（onAreaChange 更新）。 */
+  @Local cardW: number = 0;
+  @Local cardH: number = 0;
 
   /** Video 组件的控制器：start/pause/stop 都通过它操作。 */
   private controller: VideoController = new VideoController();
@@ -99,9 +122,9 @@ export struct ScreensaverVideoCard {
    * 准备视频源：
    *   - 空 uri → 显示「未选择视频」；
    *   - 探测不可读 → 显示「视频不可用」；
-   *   - 可读 → 生成（或命中缓存的）首帧封面图。
-   * cover 用 640×360 而不是卡片实际尺寸：封面只是预览图，
-   * 统一规格能显著提高缓存命中率（不同大小卡片共享同一份封面文件）。
+   *   - 可读 → 读取视频真实宽高（计算内容容器比例）并生成（或命中缓存的）首帧封面图。
+   * 封面缓存仍以「目标尺寸」入文件名：变更项 2 之后按视频等比尺寸生成
+   * （不再固定 640×360），避免竖屏视频封面被拉伸后与容器比例不符。
    */
   private async prepareSource(): Promise<void> {
     const uri = this.card.video.uri;
@@ -109,6 +132,7 @@ export struct ScreensaverVideoCard {
       this.emptyVisible = true;
       this.unavailable = false;
       this.coverPath = '';
+      this.videoRatio = 0;
       return;
     }
     const readable = screenSaverVideoThumb.probeReadable(uri);
@@ -116,14 +140,53 @@ export struct ScreensaverVideoCard {
     this.emptyVisible = false;
     if (!readable) {
       this.coverPath = '';
+      this.videoRatio = 0;
       return;
     }
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined) {
       return;
     }
-    const cover = await screenSaverVideoThumb.firstFrameFile(context, uri, 640, 360);
+    // 视频真实尺寸（元数据读取一次并缓存；失败时 videoRatio=0 → Contain 兜底）。
+    const videoSize = await screenSaverVideoThumb.probeVideoSize(uri);
+    let coverWidth = 640;
+    let coverHeight = 360;
+    if (videoSize !== undefined && videoSize.width > 0 && videoSize.height > 0) {
+      this.videoRatio = videoSize.width / videoSize.height;
+      const fitted: ScreenSaverFitSize = screenSaverFittedSize(videoSize.width, videoSize.height, 640, 360, 1280);
+      coverWidth = fitted.width;
+      coverHeight = fitted.height;
+    } else {
+      this.videoRatio = 0;
+    }
+    const cover = await screenSaverVideoThumb.firstFrameFile(context, uri, coverWidth, coverHeight);
     this.coverPath = cover;
+  }
+
+  /** 当前墨色档的调色板（文字颜色与兜底投影色都从这里取，同一来源）。 */
+  private palette(): ScreensaverCardPalette {
+    return screenSaverCardPalette(this.cardTone);
+  }
+
+  /** 文字投影参数（halo 关闭时 radius=0 = 不画，不引入条件分支）。 */
+  private textShadow(): ShadowOptions {
+    return screenSaverTextShadow(this.cardHalo, this.palette().halo);
+  }
+
+  /**
+   * 内容容器尺寸（vp）：按视频真实比例等比放进卡片，未铺满时留出透明区域。
+   * 比例未知（探测失败/未选视频）时返回整卡尺寸（等价旧的 Contain 兜底渲染）。
+   */
+  private contentWidth(): number {
+    const width = this.cardW > 0 ? this.cardW : 320;
+    const height = this.cardH > 0 ? this.cardH : 480;
+    return screenSaverContainSize(width, height, this.videoRatio).width;
+  }
+
+  private contentHeight(): number {
+    const width = this.cardW > 0 ? this.cardW : 320;
+    const height = this.cardH > 0 ? this.cardH : 480;
+    return screenSaverContainSize(width, height, this.videoRatio).height;
   }
 
   /**
@@ -196,13 +259,14 @@ export struct ScreensaverVideoCard {
   }
 
   /**
-   * 界面结构（Stack 分层）——变更项 3 之后不再有任何常驻控件层：
-   *   1. 视频画面（有视频且可用时）：
-   *      · **不播放**时用 Image 显示封面帧（objectFit=Contain）——Image 的 letterbox
-   *        区域天然透明，比例不一致时露出屏保整体背景（变更项 4）；
-   *        之前用 Video 组件的 previewUri 承担这件事，但原生视频 surface 的
-   *        letterbox 是不透明黑边，无法满足「黑边全透明」，因此拆开；
-   *      · **播放**时挂载 Video 组件（objectFit=Contain）。
+   * 界面结构（Stack 分层）——变更项 1~3 之后不再有任何常驻控件层：
+   *   1. 视频画面（有视频且可用时）放进「内容容器」：
+   *      · 容器尺寸 = 按视频真实比例等比放进卡片（变更项 2）；
+   *      · 容器圆角 = 卡片圆角（SCREEN_SAVER_METRICS.cardRadius，10vp），
+   *        未铺满时圆角落在画面四角上，铺满时与卡片圆角一致（两次确认后的方案）；
+   *      · **不播放**时用 Image 显示封面帧（objectFit=Contain，letterbox 透明）；
+   *      · **播放**时挂载 Video 组件（objectFit=Contain，容器已贴合视频比例，
+   *        播放器内部不再出现 letterbox 黑边）。
    *   2. 「未选择视频」占位（极简档压成一行小字，避免 1×1 里文字溢出）；
    *   3. 「视频不可用」占位（含编辑态「重选」按钮，仅完整档显示按钮）。
    *
@@ -210,66 +274,80 @@ export struct ScreensaverVideoCard {
    * 播放入口改为：屏保展示态单击卡片（ScreensaverPage 统一分发）；
    * 编辑态/面板预览用设置面板里的「播放视频」开关。
    *
-   * 播放中视频由原生播放器做 letterbox：其黑边属于播放器画面的一部分
-   * （应用侧无法把它改成透明），这是系统组件行为，已在交付文档中如实标注。
+   * 文字颜色随墨色档切换（变更项 3.2），复杂背景/对比度不足时带轻投影兜底。
    */
   build() {
     Stack() {
       if (this.card.video.uri.length > 0 && !this.unavailable) {
-        if (!this.card.video.playing && this.coverUri().length > 0) {
-          // 静态态：封面帧用 Image 显示（letterbox 透明）
-          Image(this.coverUri())
-            .objectFit(ImageFit.Contain)
-            .width('100%')
-            .height('100%')
-        } else {
-          Video({
-            src: this.card.video.uri,
-            // previewUri：播放器就绪前的预览图（封面帧缓存，需 file:// 前缀）
-            previewUri: this.coverUri().length > 0 ? this.coverUri() : undefined,
-            controller: this.controller
-          })
-            .autoPlay(false)   // 永不自动播放，由 syncPlayback 统一控制
-            .controls(false)   // 屏保上不要系统控制条
-            .loop(this.card.video.loop)
-            .muted(this.card.video.muted)
-            .objectFit(ImageFit.Contain)
-            .width('100%')
-            .height('100%')
-            .backgroundColor(Color.Transparent)
-            .onPrepared((): void => {
-              // 播放器就绪后才能 start；如果开关已经打开，这里立即开始播
-              ScreenSaverLogger.info('video component prepared');
-              this.prepared = true;
-              this.syncPlayback();
+        Stack() {
+          if (!this.card.video.playing && this.coverUri().length > 0) {
+            // 静态态：封面帧用 Image 显示（letterbox 透明）
+            Image(this.coverUri())
+              .objectFit(ImageFit.Contain)
+              .width('100%')
+              .height('100%')
+          } else {
+            Video({
+              src: this.card.video.uri,
+              // previewUri：播放器就绪前的预览图（封面帧缓存，需 file:// 前缀）
+              previewUri: this.coverUri().length > 0 ? this.coverUri() : undefined,
+              controller: this.controller
             })
-            .onFinish((): void => {
-              // 播完（未开循环）：开关复位，回到封面帧状态
-              if (!this.card.video.loop) {
-                this.card.video.playing = false;
-              }
-            })
-            .onError((): void => {
-              ScreenSaverLogger.warn('video component error');
-              this.prepared = false;
-            })
+              .autoPlay(false)   // 永不自动播放，由 syncPlayback 统一控制
+              .controls(false)   // 屏保上不要系统控制条
+              .loop(this.card.video.loop)
+              .muted(this.card.video.muted)
+              .objectFit(ImageFit.Contain)
+              .width('100%')
+              .height('100%')
+              .backgroundColor(Color.Transparent)
+              // 原生 surface 的圆角：官方 FAQ 要求「同组件设置 borderRadius +
+              // 背景色透明」，父容器再叠一层 clip 裁剪兜底（双保险）。
+              .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
+              .clip(true)
+              .onPrepared((): void => {
+                // 播放器就绪后才能 start；如果开关已经打开，这里立即开始播
+                ScreenSaverLogger.info('video component prepared');
+                this.prepared = true;
+                this.syncPlayback();
+              })
+              .onFinish((): void => {
+                // 播完（未开循环）：开关复位，回到封面帧状态
+                if (!this.card.video.loop) {
+                  this.card.video.playing = false;
+                }
+              })
+              .onError((): void => {
+                ScreenSaverLogger.warn('video component error');
+                this.prepared = false;
+              })
+          }
         }
+        // 内容容器：紧贴视频比例 + 与卡片一致的圆角裁剪（变更项 2）
+        .width(this.contentWidth())
+        .height(this.contentHeight())
+        .align(Alignment.Center)
+        .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
+        .clip(true)
       }
       if (this.emptyVisible) {
         if (this.density() === 'minimal') {
           // 1×1 这类极小尺寸只留一行提示，保证「不是空白」且不溢出
           Text('无视频')
             .fontSize(10)
-            .fontColor('#8C8C8C')
+            .fontColor(this.palette().textTertiary)
+            .textShadow(this.textShadow())
         } else {
           Column({ space: 4 }) {
             Text('未选择视频')
               .fontSize(this.density() === 'compact' ? 11 : 13)
-              .fontColor('#B3B3B3')
+              .fontColor(this.palette().textSecondary)
+              .textShadow(this.textShadow())
             if (this.density() === 'full') {
               Text('在配置中选择本地视频')
                 .fontSize(11)
-                .fontColor('#6E6E73')
+                .fontColor(this.palette().textTertiary)
+                .textShadow(this.textShadow())
             }
           }
           .width('100%')
@@ -281,11 +359,13 @@ export struct ScreensaverVideoCard {
         Column({ space: 6 }) {
           Text('视频不可用')
             .fontSize(this.density() === 'minimal' ? 10 : (this.density() === 'compact' ? 11 : 13))
-            .fontColor('#B3B3B3')
+            .fontColor(this.palette().textSecondary)
+            .textShadow(this.textShadow())
           if (this.density() === 'full') {
             Text('文件已被删除 · 请在配置中重新选择')
               .fontSize(11)
-              .fontColor('#6E6E73')
+              .fontColor(this.palette().textTertiary)
+              .textShadow(this.textShadow())
           }
           // 「重选」只在编辑态 + 完整档显示（小尺寸放不下按钮，整卡点按仍可进配置）
           if (this.cardMode === 'edit' && this.density() === 'full') {
@@ -312,8 +392,13 @@ export struct ScreensaverVideoCard {
     .width('100%')
     .height('100%')
     .clip(true)
-    // 变更项 4：卡片自身底色透明——视频按 Contain 播放/显示封面帧时，
-    // 比例不一致产生的 letterbox 区域完全透明，露出屏保整体背景（不再是黑色块）。
+    // 变更项 1/3.1：卡片自身无底色、无边框——画面未铺满时留白完全透明，
+    // 露出屏保整体背景（不再是黑色块）。
     .backgroundColor(Color.Transparent)
+    // 记录卡片实际尺寸：内容容器按比例实时重算（缩放/拖拽过程中圆角随之更新）。
+    .onAreaChange((oldArea: Area, newArea: Area): void => {
+      this.cardW = typeof newArea.width === 'number' ? newArea.width : 0;
+      this.cardH = typeof newArea.height === 'number' ? newArea.height : 0;
+    })
   }
 }

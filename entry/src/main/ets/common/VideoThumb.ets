@@ -26,6 +26,7 @@ import { image } from '@kit.ImageKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from './Logger';
+import { ScreenSaverFitSize } from './ContentFit';
 
 /**
  * URI → 文件路径 归一化。
@@ -44,6 +45,81 @@ function screenSaverToFilePath(uri: string): string {
 class ScreenSaverVideoThumbService {
   /** 缓存目录是否已确保创建（只创建一次，避免每次都试 mkdir）。 */
   private coverDirReady: boolean = false;
+  /**
+   * 视频原始尺寸缓存（uri → 宽高 px）。
+   * 变更项 2（视频统一处理）：计算「内容紧贴容器」需要视频真实宽高比；
+   * 元数据只需读一次，之后直接命中缓存，不重复打开媒体文件。
+   */
+  private sizeCache: Record<string, ScreenSaverFitSize> = {};
+
+  /**
+   * 读取视频原始宽高（px）。
+   * 实现路径与官方「选取视频帧作为缩略图」最佳实践一致：
+   *   AVMetadataExtractor.fetchMetadata() → videoWidth/videoHeight（字符串 px）；
+   *   videoOrientation 为 90/270 时宽高互换（旋转视频按显示方向计算比例）。
+   * 失败返回 undefined，调用方按 Contain 兜底渲染（不阻断播放）。
+   */
+  async probeVideoSize(uri: string): Promise<ScreenSaverFitSize | undefined> {
+    if (uri.length === 0) {
+      return undefined;
+    }
+    const cached = this.sizeCache[uri];
+    if (cached !== undefined) {
+      return cached;
+    }
+    let file: fileIo.File | undefined = undefined;
+    let extractor: media.AVMetadataExtractor | undefined = undefined;
+    try {
+      file = fileIo.openSync(screenSaverToFilePath(uri), fileIo.OpenMode.READ_ONLY);
+      extractor = await media.createAVMetadataExtractor();
+      const fdSrc: media.AVFileDescriptor = { fd: file.fd };
+      extractor.fdSrc = fdSrc;
+      const metadata = await extractor.fetchMetadata();
+      const rawWidth = metadata.videoWidth;
+      const rawHeight = metadata.videoHeight;
+      if (rawWidth === undefined || rawHeight === undefined) {
+        return undefined;
+      }
+      const width = parseInt(rawWidth, 10);
+      const height = parseInt(rawHeight, 10);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        return undefined;
+      }
+      const size: ScreenSaverFitSize = this.isQuarterTurn(metadata.videoOrientation) ?
+        { width: height, height: width } : { width: width, height: height };
+      this.sizeCache[uri] = size;
+      ScreenSaverLogger.info(`video size probe: ${width}x${height} -> box ${size.width}x${size.height}`);
+      return size;
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`video size probe failed: ${error.message}`);
+      return undefined;
+    } finally {
+      if (extractor !== undefined) {
+        try {
+          extractor.release();
+        } catch (releaseErr) {
+          ScreenSaverLogger.warn('video metadata extractor release failed');
+        }
+      }
+      if (file !== undefined) {
+        try {
+          fileIo.closeSync(file);
+        } catch (closeErr) {
+          ScreenSaverLogger.warn('video metadata file close failed');
+        }
+      }
+    }
+  }
+
+  /** 是否四分一直转（orientation 90/270：宽高需要对调）。 */
+  private isQuarterTurn(orientation: string | undefined): boolean {
+    if (orientation === undefined) {
+      return false;
+    }
+    const value = parseInt(orientation, 10);
+    return value === 90 || value === 270;
+  }
 
   /**
    * 入口：拿到某个视频在目标尺寸下的封面图文件路径。

@@ -29,11 +29,13 @@
 
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverRelativeTime } from '../common/DateFormats';
+import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
 import { screenSaverMotionOff } from '../common/Motion';
 import { screenSaverGitViewModel } from '../model/GitViewModel';
 import { screenSaverAppModel } from '../model/AppModel';
-import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode, ScreensaverGitDay } from '../model/ConfigModels';
+import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode, ScreensaverGitDay,
+  ScreensaverInkTone } from '../model/ConfigModels';
 
 // 一周 7 天（周日~周六，和 GitHub 一致）。
 const GIT_WEEKDAY_COUNT: number = 7;
@@ -45,10 +47,6 @@ const GIT_COMPACT_MAX_WEEKS: number = 12;
 const GIT_MINIMAL_DAYS: number = 7;
 const GIT_MINIMAL_BAR_MAX: number = 26;
 const GIT_MINIMAL_BAR_WIDTH: number = 6;
-// 三套五级配色：index 0（无提交）→ 4（提交最多）。绿色是 GitHub 经典配色。
-const GIT_LEVELS_GREEN: string[] = ['#21262D', '#0E4429', '#006D32', '#26A641', '#39D353'];
-const GIT_LEVELS_BLUE: string[] = ['#21262D', '#0A3069', '#0969DA', '#218BFF', '#79C0FF'];
-const GIT_LEVELS_GRAY: string[] = ['#1C1C1E', '#2E2E30', '#444446', '#5A5A5C', '#707072'];
 
 @ComponentV2
 export struct ScreensaverGitCard {
@@ -56,8 +54,24 @@ export struct ScreensaverGitCard {
   @Param cardMode: ScreensaverCardMode = 'play';
   /** 屏保在前台时为 true（后台不发起刷新）。 */
   @Param cardActive: boolean = true;
+  /**
+   * 文字墨色档与投影兜底开关（变更项 3.2/3.3）。
+   * 由屏保页统一解析后下发（同一来源）；热力图分级配色随档位切换深浅两套。
+   */
+  @Param cardTone: ScreensaverInkTone = 'light';
+  @Param cardHalo: boolean = false;
   /** 请求打开配置面板（未配 token 时引导用户去填）。 */
   @Event onRequestConfig: () => void = (): void => {};
+
+  /** 当前墨色档的调色板（文字 + 热力图分级配色，同一来源）。 */
+  private palette(): ScreensaverCardPalette {
+    return screenSaverCardPalette(this.cardTone);
+  }
+
+  /** 文字投影参数（halo 关闭时 radius=0 = 不画）。 */
+  private textShadow(): ShadowOptions {
+    return screenSaverTextShadow(this.cardHalo, this.palette().halo);
+  }
 
   /**
    * 当前尺寸对应的内容密度档（尺寸矩阵查表得到）。
@@ -120,23 +134,35 @@ export struct ScreensaverGitCard {
     return 4;
   }
 
-  /** 级别 → 颜色。优先级：离线灰 > 用户选的配色 > 默认绿。级别越界取两端。 */
+  /** 级别 → 颜色（1~4 级）。优先级：离线灰 > 用户选的配色 > 默认绿；级别越界取两端。 */
   private paletteColor(level: number): string {
-    let palette: string[] = GIT_LEVELS_GREEN;
+    let palette: string[] = this.palette().gitLevelsGreen;
     if (this.isOfflineView()) {
-      palette = GIT_LEVELS_GRAY;
+      palette = this.palette().gitLevelsGray;
     } else if (this.card.git.palette === 'blue') {
-      palette = GIT_LEVELS_BLUE;
+      palette = this.palette().gitLevelsBlue;
     } else if (this.card.git.palette === 'gray') {
-      palette = GIT_LEVELS_GRAY;
+      palette = this.palette().gitLevelsGray;
     }
-    if (level < 0) {
-      return palette[0];
+    if (level < 1) {
+      return palette[1];
     }
     if (level >= palette.length) {
       return palette[palette.length - 1];
     }
     return palette[level];
+  }
+
+  /**
+   * 单格底色（变更项 3.1 已确认方案）：
+   * 0 级（无提交）**全透明**——不画「近黑小方块」，露出屏保整体背景，
+   * 底色块去掉后浅色背景下也不会出现新的黑块；1~4 级用分级配色。
+   */
+  private cellColor(level: number): ResourceColor {
+    if (level <= 0) {
+      return Color.Transparent;
+    }
+    return this.paletteColor(level);
   }
 
   /**
@@ -318,15 +344,16 @@ export struct ScreensaverGitCard {
     Column({ space: 2 }) {
       Text(`${screenSaverGitViewModel.total}`)
         .fontSize(16)
-        .fontColor('#E6E6E6')
+        .fontColor(this.palette().textPrimary)
         .maxLines(1)
+        .textShadow(this.textShadow())
       Row({ space: 2 }) {
         ForEach(this.recentDays(), (day: ScreensaverGitDay) => {
           Column()
             .width(GIT_MINIMAL_BAR_WIDTH)
             .height(this.minimalBarHeight(this.levelFor(day.count)))
             .borderRadius(1)
-            .backgroundColor(this.paletteColor(this.levelFor(day.count)))
+            .backgroundColor(this.cellColor(this.levelFor(day.count)))
         }, (day: ScreensaverGitDay): string => `mini_${day.date}_${day.count}`)
       }
       .height(GIT_MINIMAL_BAR_MAX)
@@ -354,15 +381,17 @@ export struct ScreensaverGitCard {
         Row() {
           Text('GitHub 贡献')
             .fontSize(12)
-            .fontColor('#B3B3B3')
+            .fontColor(this.palette().textSecondary)
             .maxLines(1)
+            .textShadow(this.textShadow())
           Blank()
           if (screenSaverGitViewModel.state === 'loading') {
             // 加载中：关动效时用文字，否则用系统转圈动画
             if (screenSaverMotionOff()) {
               Text('刷新中…')
                 .fontSize(10)
-                .fontColor('#77777D')
+                .fontColor(this.palette().textTertiary)
+                .textShadow(this.textShadow())
             } else {
               LoadingProgress()
                 .width(16)
@@ -394,9 +423,10 @@ export struct ScreensaverGitCard {
           Column({ space: 4 }) {
             Text(this.statusText())
               .fontSize(11)
-              .fontColor('#8C8C8C')
+              .fontColor(this.palette().textTertiary)
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .textShadow(this.textShadow())
           }
           .width('100%')
           .layoutWeight(1)
@@ -411,7 +441,7 @@ export struct ScreensaverGitCard {
                     .width(this.cellSize())
                     .height(this.cellSize())
                     .borderRadius(2)
-                    .backgroundColor(this.paletteColor(level))
+                    .backgroundColor(this.cellColor(level))
                 }, (level: number, dayIndex: number): string => `d_${weekIndex}_${dayIndex}_${level}`)
               }
             }, (week: number[], weekIndex: number): string => `w_${weekIndex}_${week.length}`)
@@ -424,10 +454,11 @@ export struct ScreensaverGitCard {
         if (this.density() === 'full') {
           Text(this.footerText())
             .fontSize(10)
-            .fontColor('#6E6E73')
+            .fontColor(this.palette().textTertiary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .margin({ top: 4 })
+            .textShadow(this.textShadow())
         }
       }
     }

@@ -43,13 +43,31 @@
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverOpenLink } from '../common/AppLinkLauncher';
+import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
-import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode } from '../model/ConfigModels';
+import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode,
+  ScreensaverInkTone } from '../model/ConfigModels';
 
 @ComponentV2
 export struct ScreensaverEntryCard {
   @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
   @Param cardMode: ScreensaverCardMode = 'play';
+  /**
+   * 文字/图标墨色档与投影兜底开关（变更项 3.2/3.3/3.4）。
+   * 由屏保页统一解析后下发（同一来源）；中性图标随档位切换深浅两套。
+   */
+  @Param cardTone: ScreensaverInkTone = 'light';
+  @Param cardHalo: boolean = false;
+
+  /** 当前墨色档的调色板（文字 + 图标素材版本，同一来源）。 */
+  private palette(): ScreensaverCardPalette {
+    return screenSaverCardPalette(this.cardTone);
+  }
+
+  /** 文字投影参数（halo 关闭时 radius=0 = 不画）。 */
+  private textShadow(): ShadowOptions {
+    return screenSaverTextShadow(this.cardHalo, this.palette().halo);
+  }
 
   /** 当前尺寸对应的内容密度档（尺寸矩阵查表）。 */
   private density(): ScreensaverCardDensity {
@@ -65,9 +83,11 @@ export struct ScreensaverEntryCard {
   }
 
   /**
-   * 由名称稳定派生一个色相（0~23 档），映射到一组中性配色。
+   * 由名称稳定派生一个色相（0~5 档），映射到当前墨色档的 6 档中性配色。
    * 目的：同一名称永远同一颜色（这就是「缓存」），不同入口可相互区分；
-   * 颜色全部是本文件内的固定色值，不来自任何第三方素材。
+   * 颜色全部是本文件/主题文件内的固定色值，不来自任何第三方素材。
+   * 深浅两套由 CardTheme 统一维护：浅色档配深色背景、深色档配浅色背景，
+   * 每档都满足「图标底色对背景 ≥ 3:1、首字对底色 ≥ 4.5:1」的设计目标。
    */
   private iconPaletteIndex(): number {
     const name = this.card.entry.displayName;
@@ -81,10 +101,9 @@ export struct ScreensaverEntryCard {
     return hash % 6;
   }
 
-  /** 中性图标底色（6 档固定色，色相按名称稳定映射）。 */
+  /** 中性图标底色（随墨色档切换深浅两套，见 CardTheme）。 */
   private iconColor(): string {
-    const palette: string[] = ['#4A6B8A', '#5B7F6B', '#8A6B4A', '#6B5B8A', '#8A4A5B', '#4A7F8A'];
-    return palette[this.iconPaletteIndex()];
+    return this.palette().iconTints[this.iconPaletteIndex()];
   }
 
   /** 名称首字（极简档与图标内都用，1×1 放不下完整名称）。 */
@@ -98,14 +117,15 @@ export struct ScreensaverEntryCard {
 
   /**
    * 自绘中性图标：圆角方块 + 名称首字。
-   * 无外部素材、无网络请求、无解码；尺寸随密度档变化。
+   * 无外部素材、无网络请求、无解码；尺寸随密度档变化，
+   * 配色随墨色档切换（可运行时着色，见 CardTheme 的说明）。
    */
   @Builder
   neutralIcon(size: number, fontSize: number) {
     Column() {
       Text(this.initial())
         .fontSize(fontSize)
-        .fontColor('#F2F2F2')
+        .fontColor(this.palette().iconInitial)
         .fontWeight(FontWeight.Medium)
         .maxLines(1)
     }
@@ -167,31 +187,35 @@ export struct ScreensaverEntryCard {
         this.neutralIcon(this.iconSize(), this.density() === 'minimal' ? 13 : 16)
         Text(this.density() === 'minimal' ? '入口' : '未配置入口')
           .fontSize(this.density() === 'minimal' ? 9 : 11)
-          .fontColor('#8C8C8C')
+          .fontColor(this.palette().textTertiary)
           .maxLines(1)
+          .textShadow(this.textShadow())
       } else if (this.density() === 'minimal') {
         // 1×1 / 2×1 / 1×2：图标 + 短名（放不下按钮，跳转走屏保态点击或大尺寸）
         this.neutralIcon(26, 13)
         Text(this.card.entry.displayName)
           .fontSize(9)
-          .fontColor('#D0D0D0')
+          .fontColor(this.palette().textSecondary)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textShadow(this.textShadow())
       } else {
         Row({ space: 8 }) {
           this.neutralIcon(this.iconSize(), this.density() === 'compact' ? 15 : 18)
           Column({ space: 1 }) {
             Text(this.card.entry.displayName)
               .fontSize(this.density() === 'compact' ? 13 : 15)
-              .fontColor('#F2F2F2')
+              .fontColor(this.palette().textPrimary)
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .textShadow(this.textShadow())
             if (this.card.entry.subtitle.length > 0) {
               Text(this.card.entry.subtitle)
                 .fontSize(11)
-                .fontColor('#8C8C8C')
+                .fontColor(this.palette().textTertiary)
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .textShadow(this.textShadow())
             }
           }
           .alignItems(HorizontalAlign.Start)

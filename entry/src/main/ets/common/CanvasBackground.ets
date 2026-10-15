@@ -36,6 +36,7 @@ import { effectKit } from '@kit.ArkGraphics2D';
 import { fileIo } from '@kit.CoreFileKit';
 import { ScreenSaverLogger } from './Logger';
 import { screenSaverFittedSize, ScreenSaverFitSize } from './ContentFit';
+import { screenSaverImageLoader, screenSaverRelativeLuminance } from './ImageLoader';
 
 /** 离屏模糊半径（px，作用在长边 ≤1080px 的解码结果上；实现侧方案，待确认）。 */
 export const SCREEN_SAVER_CANVAS_BLUR_RADIUS: number = 40;
@@ -57,10 +58,21 @@ class ScreenSaverCanvasBackgroundService {
   private generation: number = 0;
   /** 实际执行的离屏计算次数（验证「一次计算 + 缓存复用」用）。 */
   private computeCount: number = 0;
+  /**
+   * 背景图（模糊后）主色的 WCAG 相对亮度（0~1），-1 = 未知。
+   * 变更项 3.2：自动文字色判定的取样结果，随位图缓存一起维护，
+   * 卡片每次重绘只读这个缓存，不重复取色。
+   */
+  private cachedLuminanceValue: number = -1;
 
   /** 已完成的离屏计算次数（验证脚本/日志用）。 */
   computedTimes(): number {
     return this.computeCount;
+  }
+
+  /** 背景图主色的相对亮度缓存（-1 = 还没有可用背景图）。 */
+  cachedLuminance(): number {
+    return this.cachedLuminanceValue;
   }
 
   /**
@@ -105,8 +117,11 @@ class ScreenSaverCanvasBackgroundService {
       this.releaseMap(this.cached);
       this.cached = result;
       this.cacheKey = key;
+      // 变更项 3.2：取一次主色亮度并缓存（取样时机 = 背景图就绪的这一刻）。
+      this.cachedLuminanceValue = await this.luminanceOf(this.cached);
       this.computeCount++;
-      ScreenSaverLogger.info(`canvas background ready: blur=${radius > 0} computed=${this.computeCount}`);
+      ScreenSaverLogger.info(`canvas background ready: blur=${radius > 0} computed=${this.computeCount} ` +
+        `luminance=${this.cachedLuminanceValue.toFixed(3)}`);
       return this.cached;
     } catch (err) {
       const error = err as Error;
@@ -123,6 +138,21 @@ class ScreenSaverCanvasBackgroundService {
     this.releaseMap(this.cached);
     this.cached = undefined;
     this.cacheKey = '';
+    this.cachedLuminanceValue = -1;
+  }
+
+  /**
+   * 取背景图（模糊后）主色的相对亮度。
+   * 取样方式：effectKit ColorPicker 对**整张解码图**取主色（≈ 主要区域平均色），
+   * 再把主色换算成 WCAG 相对亮度；失败返回 -1（调用方退回纯色背景判定）。
+   * 调用时机：仅在背景位图计算完成时调用一次（见 ensure），不做逐帧取样。
+   */
+  private async luminanceOf(map: image.PixelMap): Promise<number> {
+    const mainHex = await screenSaverImageLoader.extractMainColor(map);
+    if (mainHex === undefined) {
+      return -1;
+    }
+    return screenSaverRelativeLuminance(mainHex);
   }
 
   /** 等比缩小解码（长边 ≤ SCREEN_SAVER_CANVAS_MAX_EDGE，绝不放大）。 */

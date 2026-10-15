@@ -88,6 +88,68 @@ function screenSaverChannelHex(value: number): string {
   return clamped.toString(16).padStart(2, '0');
 }
 
+/** 拆解后的 RGB 三通道（0~255）。 */
+interface ScreenSaverRgb {
+  red: number;
+  green: number;
+  blue: number;
+}
+
+/**
+ * '#RRGGBB' → RGB 三通道。非法输入返回 undefined。
+ * 只接受与 screenSaverDarkenHex 相同的 7 位格式（#RRGGBB），不做额外兼容。
+ */
+function screenSaverHexToRgb(hex: string): ScreenSaverRgb | undefined {
+  if (hex.length !== 7 || !hex.startsWith('#')) {
+    return undefined;
+  }
+  const red = parseInt(hex.substring(1, 3), 16);
+  const green = parseInt(hex.substring(3, 5), 16);
+  const blue = parseInt(hex.substring(5, 7), 16);
+  if (Number.isNaN(red) || Number.isNaN(green) || Number.isNaN(blue)) {
+    return undefined;
+  }
+  const rgb: ScreenSaverRgb = { red: red, green: green, blue: blue };
+  return rgb;
+}
+
+/**
+ * WCAG 2.x 相对亮度（Relative Luminance）：单通道 0~1 的线性化。
+ * 公式来源：WCAG 2.1 §Relative luminance（sRGB 线性化 + 0.2126/0.7152/0.0722 加权）。
+ */
+function screenSaverLinearChannel(value: number): number {
+  if (value <= 0.03928) {
+    return value / 12.92;
+  }
+  return Math.pow((value + 0.055) / 1.055, 2.4);
+}
+
+/**
+ * '#RRGGBB' → WCAG 相对亮度（0=纯黑，1=纯白）。
+ * 用途（变更项 3.2）：自动文字色的唯一判定来源。
+ * 非法输入按纯黑（0）处理，保证判定链路不崩溃。
+ */
+export function screenSaverRelativeLuminance(hex: string): number {
+  const rgb = screenSaverHexToRgb(hex);
+  if (rgb === undefined) {
+    return 0;
+  }
+  const red = screenSaverLinearChannel(rgb.red / 255);
+  const green = screenSaverLinearChannel(rgb.green / 255);
+  const blue = screenSaverLinearChannel(rgb.blue / 255);
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+/**
+ * 两档亮度的 WCAG 对比度（1:1 ~ 21:1）。
+ * 变更项 3.3 的内部验收判据：正文文字与其下方背景的对比度 ≥ 4.5:1。
+ */
+export function screenSaverContrastRatio(luminanceA: number, luminanceB: number): number {
+  const lighter = Math.max(luminanceA, luminanceB);
+  const darker = Math.min(luminanceA, luminanceB);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 class ScreenSaverImageLoaderService {
   /**
    * 探测一个 uri 的文件当前是否可读（比如照片被删除、权限被收回后变不可读）。

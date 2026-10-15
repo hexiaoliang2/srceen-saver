@@ -943,6 +943,15 @@ export class ScreensaverAppModel {
     }
     settings.canvasImageUri = rawSettings.canvasImageUri ?? '';
     settings.canvasBlur = rawSettings.canvasBlur ?? false;
+    // 文字与装饰可读性（变更项 3.2）：文字色档位只认白名单三值，非法数据回退默认「自动」；
+    // 投影兜底开关默认开（复杂背景下优先保证可读性）。
+    const rawTone = rawSettings.textTone;
+    if (rawTone === 'auto' || rawTone === 'dark' || rawTone === 'light') {
+      settings.textTone = rawTone;
+    } else {
+      settings.textTone = 'auto';
+    }
+    settings.textHalo = rawSettings.textHalo ?? true;
   }
 
   /**
@@ -1194,7 +1203,9 @@ export class ScreensaverAppModel {
       lowBatteryAutoExit: settings.lowBatteryAutoExit,
       canvasColor: settings.canvasColor,
       canvasImageUri: settings.canvasImageUri,
-      canvasBlur: settings.canvasBlur
+      canvasBlur: settings.canvasBlur,
+      textTone: settings.textTone,
+      textHalo: settings.textHalo
     };
     const rawLayout: ScreensaverRawLayout = {
       schemaVersion: SCREEN_SAVER_SCHEMA_VERSION,
