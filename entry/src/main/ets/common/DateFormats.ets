@@ -191,3 +191,94 @@ function fromMsToClock(ms: number): string {
   const minutes = date.getMinutes().toString().padStart(2, '0');
   return `${hours}:${minutes}`;
 }
+
+// =====================================================================
+// 日期键（YYYY-MM-DD）工具：倒计时卡 / 节假日聚合 / 待办都按“自然日”比较。
+// 统一用本地时区的午夜作为基准，避免 UTC 偏移导致天数少一天。
+// =====================================================================
+
+/** Date → 本地日期键 YYYY-MM-DD。 */
+export function screenSaverDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = (date.getMonth() + 1).toString().padStart(2, '0');
+  const day = date.getDate().toString().padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/** 今天（本地时区）的日期键。 */
+export function screenSaverTodayKey(): string {
+  return screenSaverDateKey(new Date());
+}
+
+/** YYYY-MM-DD → 本地午夜 Date；格式/日期非法返回 undefined。 */
+export function screenSaverDateFromKey(key: string): Date | undefined {
+  if (key.length !== 10 || key.charAt(4) !== '-' || key.charAt(7) !== '-') {
+    return undefined;
+  }
+  const year = Number(key.substring(0, 4));
+  const month = Number(key.substring(5, 7));
+  const day = Number(key.substring(8, 10));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return undefined;
+  }
+  const date = new Date(year, month - 1, day, 0, 0, 0, 0);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    return undefined;
+  }
+  return date;
+}
+
+/** 在日期键上加减天数（本地自然日）。非法日期键返回空串。 */
+export function screenSaverAddDays(key: string, days: number): string {
+  const date = screenSaverDateFromKey(key);
+  if (date === undefined) {
+    return '';
+  }
+  date.setDate(date.getDate() + days);
+  return screenSaverDateKey(date);
+}
+
+/**
+ * 两个日期键相差的自然日数（to - from）。
+ * 用本地午夜做差再四舍五入，避免夏令时/时区造成的 23/25 小时误差。
+ */
+export function screenSaverDayDiff(fromKey: string, toKey: string): number {
+  const from = screenSaverDateFromKey(fromKey);
+  const to = screenSaverDateFromKey(toKey);
+  if (from === undefined || to === undefined) {
+    return 0;
+  }
+  return Math.round((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+/** 日期键 → 「10月23日」；跨年带年份「2027年1月1日」。 */
+export function screenSaverMonthDayChineseLabel(key: string, includeYear: boolean): string {
+  const date = screenSaverDateFromKey(key);
+  if (date === undefined) {
+    return key;
+  }
+  const base = `${date.getMonth() + 1}月${date.getDate()}日`;
+  return includeYear ? `${date.getFullYear()}年${base}` : base;
+}
+
+/** 完整日期展示：「2026年10月1日」。非法键原样返回。 */
+export function screenSaverDateKeyFullLabel(key: string): string {
+  const date = screenSaverDateFromKey(key);
+  if (date === undefined) {
+    return key;
+  }
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+/** 毫秒时间戳 → 「10/18 14:05」，用于缓存时间/数据时间。 */
+export function screenSaverFormatStamp(ms: number): string {
+  if (ms <= 0) {
+    return '';
+  }
+  const date = new Date(ms);
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const hours = date.getHours().toString().padStart(2, '0');
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  return `${month}/${day} ${hours}:${minutes}`;
+}

@@ -167,7 +167,7 @@ export struct ScreenSaverCardLibraryPage {
         .padding({ left: 16, right: 16 })
 
         // ---------- 页脚规则说明 ----------
-        Text('时钟 / Git 最多添加一张，相册 / 视频可添加多张 · 添加后在编辑模式调整位置与尺寸')
+        Text('时钟 / Git 最多添加一张；相册 / 视频 / 天气 / 入口 / 行情 / 倒计时 / 待办可添加多张 · 添加后在编辑模式调整位置与尺寸')
           .fontSize(11)
           .fontColor(SCREEN_SAVER_COLORS.textTertiary)
           .padding({ top: 12, bottom: 20 })

@@ -43,34 +43,56 @@ import {
   SCREEN_SAVER_GRID_COLS,
   SCREEN_SAVER_GRID_ROWS,
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
+  SCREEN_SAVER_QUOTES_MAX_SYMBOLS,
   SCREEN_SAVER_SCHEMA_VERSION,
+  SCREEN_SAVER_TODO_DATA_VERSION,
+  SCREEN_SAVER_TODO_MAX_ITEMS,
+  SCREEN_SAVER_TODO_MAX_LEN,
   SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
   screenSaverIsCanvasColor,
   ScreensaverCardInstance,
   ScreensaverCardMeta,
   ScreensaverCardType,
+  ScreensaverCustomCountdown,
   ScreensaverGitData,
   ScreensaverGitDay,
   ScreensaverGridPos,
   ScreensaverGridSlot,
+  ScreensaverHolidayDay,
+  ScreensaverHolidayYear,
   ScreensaverLayout,
+  ScreensaverQuote,
+  ScreensaverQuotesData,
   ScreensaverRawCard,
   ScreensaverRawClock,
+  ScreensaverRawCountdown,
+  ScreensaverRawCustomCountdown,
   ScreensaverRawEntry,
   ScreensaverRawGit,
   ScreensaverRawGitCache,
   ScreensaverRawGitDay,
+  ScreensaverRawHolidayDay,
+  ScreensaverRawHolidayYear,
   ScreensaverRawLayout,
   ScreensaverRawPage,
   ScreensaverRawPhoto,
+  ScreensaverRawQuotes,
+  ScreensaverRawQuotesCache,
+  ScreensaverRawQuote,
   ScreensaverRawSettings,
+  ScreensaverRawTodo,
+  ScreensaverRawTodoItem,
+  ScreensaverRawTradingCalendar,
   ScreensaverRawVideo,
   ScreensaverRawWeather,
   ScreensaverRawWeatherCache,
   ScreensaverResizeResult,
   ScreensaverSettings,
+  ScreensaverTodoItem,
+  ScreensaverTradingCalendarData,
   ScreensaverWeatherData
 } from './ConfigModels';
+import { screenSaverNormalizeStoredQuotes } from './QuoteSymbols';
 
 // ---------- 持久化键名（Preferences 里的 key） ----------
 const SCREEN_SAVER_STORE_NAME: string = 'screen_saver_store';       // 偏好数据库文件名
@@ -80,11 +102,14 @@ const SCREEN_SAVER_GUIDE_KEY: string = 'screen_saver_guide_done';   // 引导页
 const SCREEN_SAVER_GIT_TOKEN_KEY: string = 'screen_saver_git_token';// GitHub 访问令牌
 const SCREEN_SAVER_GIT_CACHE_KEY: string = 'screen_saver_git_cache';// Git 数据离线缓存
 const SCREEN_SAVER_WEATHER_CACHE_KEY: string = 'screen_saver_weather_cache'; // 天气数据离线缓存（需求 A）
+const SCREEN_SAVER_QUOTES_CACHE_KEY: string = 'screen_saver_quotes_cache';   // 行情卡离线缓存（按卡片 id）
+const SCREEN_SAVER_HOLIDAY_CACHE_KEY: string = 'screen_saver_holiday_cache'; // 在线节假日缓存（按年份）
+const SCREEN_SAVER_TRADING_CALENDAR_KEY: string = 'screen_saver_trading_calendar'; // 交易日历缓存（12h）
 // 保存防抖间隔：停下来 200ms 才真正写盘。
 const SCREEN_SAVER_SAVE_DEBOUNCE_MS: number = 200;
 
 /** 生成卡片唯一 id：前缀 + 时间戳(36进制) + 随机数，基本不可能重复。 */
-function screenSaverGenerateId(prefix: string): string {
+export function screenSaverGenerateId(prefix: string): string {
   const randomPart: number = Math.floor(Math.random() * 1000000);
   return `${prefix}_${Date.now().toString(36)}_${randomPart.toString(36)}`;
 }
@@ -99,6 +124,24 @@ function screenSaverClampInt(value: number, min: number, max: number): number {
     return max;
   }
   return rounded;
+}
+
+/** YYYY-MM-DD 日期键校验：格式、月日范围、真实日期（含闰年）。 */
+function screenSaverIsDateKey(value: string): boolean {
+  if (value.length !== 10 || value.charAt(4) !== '-' || value.charAt(7) !== '-') {
+    return false;
+  }
+  const year = Number(value.substring(0, 4));
+  const month = Number(value.substring(5, 7));
+  const day = Number(value.substring(8, 10));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return false;
+  }
+  if (year < 1970 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
 }
 
 export class ScreensaverAppModel {
@@ -122,6 +165,12 @@ export class ScreensaverAppModel {
   private gitCache: ScreensaverGitData | undefined = undefined;
   /** 天气数据的内存缓存（离线显示用，需求 A）。 */
   private weatherCache: ScreensaverWeatherData | undefined = undefined;
+  /** 行情卡缓存：cardId → 最近一次成功数据（离线显示用）。 */
+  private quotesCache: Map<string, ScreensaverQuotesData> = new Map<string, ScreensaverQuotesData>();
+  /** 在线节假日缓存：year → 该年数据（断网兜底）。 */
+  private holidayCache: Map<string, ScreensaverHolidayYear> = new Map<string, ScreensaverHolidayYear>();
+  /** 交易日历缓存：只存法定节假日日期键，12h 有效（5s 轮询期间不再请求日历）。 */
+  private tradingCalendarCache: ScreensaverTradingCalendarData | undefined = undefined;
 
   /** 注入应用上下文（EntryAbility onCreate 时调用一次）。 */
   attachContext(context: common.UIAbilityContext): void {
@@ -185,6 +234,18 @@ export class ScreensaverAppModel {
       if (typeof weatherCacheValue === 'string' && weatherCacheValue.length > 0) {
         this.weatherCache = this.parseWeatherCache(weatherCacheValue);
       }
+      const quotesCacheValue = await store.get(SCREEN_SAVER_QUOTES_CACHE_KEY, '');
+      if (typeof quotesCacheValue === 'string' && quotesCacheValue.length > 0) {
+        this.applyQuotesCacheText(quotesCacheValue);
+      }
+      const holidayCacheValue = await store.get(SCREEN_SAVER_HOLIDAY_CACHE_KEY, '');
+      if (typeof holidayCacheValue === 'string' && holidayCacheValue.length > 0) {
+        this.applyHolidayCacheText(holidayCacheValue);
+      }
+      const tradingCalendarValue = await store.get(SCREEN_SAVER_TRADING_CALENDAR_KEY, '');
+      if (typeof tradingCalendarValue === 'string' && tradingCalendarValue.length > 0) {
+        this.applyTradingCalendarText(tradingCalendarValue);
+      }
       const layoutText = await store.get(SCREEN_SAVER_LAYOUT_KEY, '');
       if (typeof layoutText === 'string' && layoutText.length > 0) {
         this.applyLayoutText(layoutText);
@@ -218,13 +279,13 @@ export class ScreensaverAppModel {
     }, SCREEN_SAVER_SAVE_DEBOUNCE_MS);
   }
 
-  /** 立即写盘（跳过防抖）。退出屏保前调用，确保最后状态落盘。 */
-  async flush(): Promise<void> {
+  /** 立即写盘（跳过防抖）。退出屏保前/关键表单保存时调用，返回是否真正落盘。 */
+  async flush(): Promise<boolean> {
     if (this.saveTimer >= 0) {
       clearTimeout(this.saveTimer);
       this.saveTimer = -1;
     }
-    await this.persistLayout();
+    return await this.persistLayout();
   }
 
   isGuideDone(): boolean {
@@ -318,6 +379,192 @@ export class ScreensaverAppModel {
       total: data.total
     };
     void this.persistFlag(SCREEN_SAVER_GIT_CACHE_KEY, JSON.stringify(raw));
+  }
+
+  // ---------- 行情缓存（按卡片实例；失败时显示上次成功数据） ----------
+
+  getQuotesCache(cardId: string): ScreensaverQuotesData | undefined {
+    return this.quotesCache.get(cardId);
+  }
+
+  setQuotesCache(cardId: string, data: ScreensaverQuotesData): void {
+    this.quotesCache.set(cardId, data);
+    const rawList: ScreensaverRawQuotesCache[] = [];
+    this.quotesCache.forEach((value: ScreensaverQuotesData, key: string): void => {
+      const rawQuotes: ScreensaverRawQuote[] = [];
+      for (const quote of value.quotes) {
+        const rawQuote: ScreensaverRawQuote = {
+          query: quote.query,
+          name: quote.name,
+          code: quote.code,
+          price: quote.price,
+          change: quote.change,
+          changePercent: quote.changePercent,
+          timeText: quote.timeText
+        };
+        rawQuotes.push(rawQuote);
+      }
+      const raw: ScreensaverRawQuotesCache = {
+        cardId: key,
+        quotes: rawQuotes,
+        fetchedAt: value.fetchedAt,
+        sourceLabel: value.sourceLabel
+      };
+      rawList.push(raw);
+    });
+    void this.persistFlag(SCREEN_SAVER_QUOTES_CACHE_KEY, JSON.stringify(rawList));
+  }
+
+  /** 解析行情缓存数组；坏条目跳过，整体解析失败只记日志。 */
+  private applyQuotesCacheText(text: string): void {
+    try {
+      const rawList = JSON.parse(text) as ScreensaverRawQuotesCache[];
+      for (const raw of rawList) {
+        if (raw.cardId === undefined || raw.cardId.length === 0) {
+          continue;
+        }
+        const quotes: ScreensaverQuote[] = [];
+        for (const rawQuote of raw.quotes ?? []) {
+          if (rawQuote.query === undefined || rawQuote.name === undefined || rawQuote.code === undefined) {
+            continue;
+          }
+          if (rawQuote.price === undefined || rawQuote.change === undefined ||
+            rawQuote.changePercent === undefined) {
+            continue;
+          }
+          const quote: ScreensaverQuote = {
+            query: rawQuote.query,
+            name: rawQuote.name,
+            code: rawQuote.code,
+            price: rawQuote.price,
+            change: rawQuote.change,
+            changePercent: rawQuote.changePercent,
+            timeText: rawQuote.timeText ?? ''
+          };
+          quotes.push(quote);
+        }
+        if (quotes.length === 0) {
+          continue;
+        }
+        const data: ScreensaverQuotesData = {
+          quotes: quotes,
+          fetchedAt: raw.fetchedAt ?? 0,
+          sourceLabel: raw.sourceLabel ?? '缓存'
+        };
+        this.quotesCache.set(raw.cardId, data);
+      }
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`quotes cache parse failed: ${error.message}`);
+    }
+  }
+
+  // ---------- 在线节假日缓存（按年份；断网兜底） ----------
+
+  getHolidayYear(year: number): ScreensaverHolidayYear | undefined {
+    return this.holidayCache.get(`${year}`);
+  }
+
+  setHolidayYear(data: ScreensaverHolidayYear): void {
+    this.holidayCache.set(`${data.year}`, data);
+    const rawList: ScreensaverRawHolidayYear[] = [];
+    this.holidayCache.forEach((value: ScreensaverHolidayYear, key: string): void => {
+      const days: ScreensaverRawHolidayDay[] = [];
+      for (const day of value.days) {
+        const rawDay: ScreensaverRawHolidayDay = {
+          name: day.name,
+          date: day.date,
+          isOffDay: day.isOffDay
+        };
+        days.push(rawDay);
+      }
+      const raw: ScreensaverRawHolidayYear = {
+        year: value.year,
+        days: days,
+        fetchedAt: value.fetchedAt
+      };
+      rawList.push(raw);
+    });
+    void this.persistFlag(SCREEN_SAVER_HOLIDAY_CACHE_KEY, JSON.stringify(rawList));
+  }
+
+  /** 解析节假日缓存数组；只接受日期合法的条目。 */
+  private applyHolidayCacheText(text: string): void {
+    try {
+      const rawList = JSON.parse(text) as ScreensaverRawHolidayYear[];
+      for (const raw of rawList) {
+        if (raw.year === undefined || raw.days === undefined) {
+          continue;
+        }
+        const days: ScreensaverHolidayDay[] = [];
+        for (const rawDay of raw.days) {
+          if (rawDay.name === undefined || rawDay.date === undefined || rawDay.isOffDay === undefined) {
+            continue;
+          }
+          const day: ScreensaverHolidayDay = {
+            name: rawDay.name,
+            date: rawDay.date,
+            isOffDay: rawDay.isOffDay
+          };
+          days.push(day);
+        }
+        const data: ScreensaverHolidayYear = {
+          year: raw.year,
+          days: days,
+          fetchedAt: raw.fetchedAt ?? 0
+        };
+        this.holidayCache.set(`${data.year}`, data);
+      }
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`holiday cache parse failed: ${error.message}`);
+    }
+  }
+
+  // ---------- 交易日历缓存（12h；只读法定节假日日期键） ----------
+
+  getTradingCalendarCache(): ScreensaverTradingCalendarData | undefined {
+    return this.tradingCalendarCache;
+  }
+
+  setTradingCalendarCache(holidayKeys: string[], fetchedAt: number, exact: boolean): void {
+    const data: ScreensaverTradingCalendarData = {
+      holidayKeys: holidayKeys,
+      fetchedAt: fetchedAt,
+      exact: exact
+    };
+    this.tradingCalendarCache = data;
+    const raw: ScreensaverRawTradingCalendar = {
+      holidayKeys: holidayKeys,
+      fetchedAt: fetchedAt,
+      exact: exact
+    };
+    void this.persistFlag(SCREEN_SAVER_TRADING_CALENDAR_KEY, JSON.stringify(raw));
+  }
+
+  /** 解析交易日历缓存；只接受合法日期键，去重，最多 400 条。 */
+  private applyTradingCalendarText(text: string): void {
+    try {
+      const raw = JSON.parse(text) as ScreensaverRawTradingCalendar;
+      const keys: string[] = [];
+      for (const key of raw.holidayKeys ?? []) {
+        if (!screenSaverIsDateKey(key) || keys.indexOf(key) >= 0) {
+          continue;
+        }
+        keys.push(key);
+        if (keys.length >= 400) {
+          break;
+        }
+      }
+      this.tradingCalendarCache = {
+        holidayKeys: keys,
+        fetchedAt: raw.fetchedAt ?? 0,
+        exact: raw.exact ?? false
+      };
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`trading calendar parse failed: ${error.message}`);
+    }
   }
 
   // =====================================================================
@@ -952,6 +1199,7 @@ export class ScreensaverAppModel {
       settings.textTone = 'auto';
     }
     settings.textHalo = rawSettings.textHalo ?? true;
+    settings.showCardBorder = rawSettings.showCardBorder ?? false;
   }
 
   /**
@@ -1032,6 +1280,9 @@ export class ScreensaverAppModel {
     this.applyRawGit(card, rawCard.git);
     this.applyRawWeather(card, rawCard.weather);
     this.applyRawEntry(card, rawCard.entry);
+    this.applyRawQuotes(card, rawCard.quotes);
+    this.applyRawCountdown(card, rawCard.countdown);
+    this.applyRawTodo(card, rawCard.todo);
     return card;
   }
 
@@ -1054,6 +1305,15 @@ export class ScreensaverAppModel {
     }
     if (value === 'entry') {
       return 'entry';
+    }
+    if (value === 'quotes') {
+      return 'quotes';
+    }
+    if (value === 'countdown') {
+      return 'countdown';
+    }
+    if (value === 'todo') {
+      return 'todo';
     }
     return undefined;
   }
@@ -1185,6 +1445,79 @@ export class ScreensaverAppModel {
     card.entry.subtitle = rawEntry.subtitle ?? '';
   }
 
+  /**
+   * Raw 行情配置 → 严格配置。
+   * symbols 来自磁盘，不可信：逐条 trim、去重、限长，最多保留 12 条；
+   * 真正的代码合法性在 QuotesViewModel 归一化时再校验一次。
+   */
+  private applyRawQuotes(card: ScreensaverCardInstance, rawQuotes: ScreensaverRawQuotes | undefined): void {
+    if (rawQuotes === undefined) {
+      return;
+    }
+    // 旧格式迁移：sh600519 / 1.600519 / 600519 / sh.600519 等统一成 6 位内部查询串。
+    const symbols = screenSaverNormalizeStoredQuotes(rawQuotes.symbols ?? [], SCREEN_SAVER_QUOTES_MAX_SYMBOLS);
+    card.quotes.symbols = symbols;
+    if (rawQuotes.colorScheme === 'redUp' || rawQuotes.colorScheme === 'greenUp') {
+      card.quotes.colorScheme = rawQuotes.colorScheme;
+    }
+    card.quotes.offlineCache = rawQuotes.offlineCache ?? true;
+  }
+
+  /** Raw 倒计时配置 → 严格配置。来源只认 auto/online/custom；自定义日期必须合法。 */
+  private applyRawCountdown(card: ScreensaverCardInstance, rawCountdown: ScreensaverRawCountdown | undefined): void {
+    if (rawCountdown === undefined) {
+      return;
+    }
+    if (rawCountdown.source === 'auto' || rawCountdown.source === 'online' ||
+      rawCountdown.source === 'custom') {
+      card.countdown.source = rawCountdown.source;
+    }
+    const items: ScreensaverCustomCountdown[] = [];
+    for (const rawItem of rawCountdown.customItems ?? []) {
+      const name = (rawItem.name ?? '').trim();
+      const date = (rawItem.date ?? '').trim();
+      if (name.length === 0 || name.length > 30 || !screenSaverIsDateKey(date)) {
+        continue;
+      }
+      const id = (rawItem.id !== undefined && rawItem.id.length > 0) ? rawItem.id : screenSaverGenerateId('cd');
+      const item: ScreensaverCustomCountdown = {
+        id: id,
+        name: name,
+        date: date,
+        yearly: rawItem.yearly ?? false
+      };
+      items.push(item);
+      if (items.length >= 30) {
+        break;
+      }
+    }
+    card.countdown.customItems = items;
+  }
+
+  /** Raw 待办配置 → 严格配置。version 固定写当前版本；文本裁剪到 60 字；最多 100 条。 */
+  private applyRawTodo(card: ScreensaverCardInstance, rawTodo: ScreensaverRawTodo | undefined): void {
+    if (rawTodo === undefined) {
+      return;
+    }
+    const items: ScreensaverTodoItem[] = [];
+    for (const rawItem of rawTodo.items ?? []) {
+      const text = (rawItem.text ?? '').trim();
+      if (text.length === 0) {
+        continue;
+      }
+      const item = new ScreensaverTodoItem();
+      item.id = (rawItem.id !== undefined && rawItem.id.length > 0) ? rawItem.id : screenSaverGenerateId('todo');
+      item.text = text.length > SCREEN_SAVER_TODO_MAX_LEN ? text.substring(0, SCREEN_SAVER_TODO_MAX_LEN) : text;
+      item.done = rawItem.done ?? false;
+      items.push(item);
+      if (items.length >= SCREEN_SAVER_TODO_MAX_ITEMS) {
+        break;
+      }
+    }
+    card.todo.version = SCREEN_SAVER_TODO_DATA_VERSION;
+    card.todo.items = items;
+  }
+
   // =====================================================================
   // 内存 → 磁盘（序列化）
   // =====================================================================
@@ -1205,7 +1538,8 @@ export class ScreensaverAppModel {
       canvasImageUri: settings.canvasImageUri,
       canvasBlur: settings.canvasBlur,
       textTone: settings.textTone,
-      textHalo: settings.textHalo
+      textHalo: settings.textHalo,
+      showCardBorder: settings.showCardBorder
     };
     const rawLayout: ScreensaverRawLayout = {
       schemaVersion: SCREEN_SAVER_SCHEMA_VERSION,
@@ -1260,6 +1594,38 @@ export class ScreensaverAppModel {
         link: card.entry.link,
         subtitle: card.entry.subtitle
       };
+      const rawQuotes: ScreensaverRawQuotes = {
+        symbols: card.quotes.symbols,
+        colorScheme: card.quotes.colorScheme,
+        offlineCache: card.quotes.offlineCache
+      };
+      const rawCustomItems: ScreensaverRawCustomCountdown[] = [];
+      for (const item of card.countdown.customItems) {
+        const rawItem: ScreensaverRawCustomCountdown = {
+          id: item.id,
+          name: item.name,
+          date: item.date,
+          yearly: item.yearly
+        };
+        rawCustomItems.push(rawItem);
+      }
+      const rawCountdown: ScreensaverRawCountdown = {
+        source: card.countdown.source,
+        customItems: rawCustomItems
+      };
+      const rawTodoItems: ScreensaverRawTodoItem[] = [];
+      for (const item of card.todo.items) {
+        const rawItem: ScreensaverRawTodoItem = {
+          id: item.id,
+          text: item.text,
+          done: item.done
+        };
+        rawTodoItems.push(rawItem);
+      }
+      const rawTodo: ScreensaverRawTodo = {
+        version: card.todo.version,
+        items: rawTodoItems
+      };
       const rawCard: ScreensaverRawCard = {
         id: card.id,
         cardType: card.cardType,
@@ -1277,7 +1643,10 @@ export class ScreensaverAppModel {
         video: rawVideo,
         git: rawGit,
         weather: rawWeather,
-        entry: rawEntry
+        entry: rawEntry,
+        quotes: rawQuotes,
+        countdown: rawCountdown,
+        todo: rawTodo
       };
       rawCards.push(rawCard);
     }
@@ -1371,6 +1740,33 @@ export class ScreensaverAppModel {
       }
       return card.entry.link.length > 0 ? card.entry.displayName : `${card.entry.displayName} · 未填链接`;
     }
+    if (card.cardType === 'quotes') {
+      if (card.quotes.symbols.length === 0) {
+        return '未添加自选标的';
+      }
+      const scheme = card.quotes.colorScheme === 'redUp' ? '红涨绿跌' : '绿涨红跌';
+      return `${card.quotes.symbols.length} 个标的 · ${scheme}`;
+    }
+    if (card.cardType === 'countdown') {
+      const source = card.countdown.source === 'online' ? '在线' :
+      (card.countdown.source === 'custom' ? '自定义' : '自动');
+      if (card.countdown.customItems.length > 0) {
+        return `${source} · 自定义 ${card.countdown.customItems.length} 项`;
+      }
+      return `${source} · 在线节假日`;
+    }
+    if (card.cardType === 'todo') {
+      let done = 0;
+      for (const item of card.todo.items) {
+        if (item.done) {
+          done++;
+        }
+      }
+      if (card.todo.items.length === 0) {
+        return '暂无待办';
+      }
+      return `未完成 ${card.todo.items.length - done} / 共 ${card.todo.items.length}`;
+    }
     return `@${card.git.username} · ${card.git.weeks} 周`;
   }
 
@@ -1436,19 +1832,21 @@ export class ScreensaverAppModel {
     return this.store;
   }
 
-  /** 把当前布局序列化并写入偏好存储。put + flush 确保真正落盘。 */
-  private async persistLayout(): Promise<void> {
+  /** 把当前布局序列化并写入偏好存储。put + flush 确保真正落盘；返回成功与否。 */
+  private async persistLayout(): Promise<boolean> {
     const store = await this.ensureStore();
     if (store === undefined) {
-      return;
+      return false;
     }
     try {
       const text = JSON.stringify(this.toRawLayout());
       await store.put(SCREEN_SAVER_LAYOUT_KEY, text);
       await store.flush();
+      return true;
     } catch (err) {
       const error = err as Error;
       ScreenSaverLogger.error(`layout save failed: ${error.message}`);
+      return false;
     }
   }
 

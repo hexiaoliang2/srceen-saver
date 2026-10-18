@@ -27,6 +27,11 @@ import { ScreensaverVideoCard } from './VideoCardView';
 import { ScreensaverGitCard } from './GitCardView';
 import { ScreensaverWeatherCard } from './WeatherCardView';
 import { ScreensaverEntryCard } from './EntryCardView';
+import { ScreensaverQuotesCard } from './QuotesCardView';
+import { ScreensaverCountdownCard } from './CountdownCardView';
+import { ScreensaverTodoCard } from './TodoCardView';
+import { CardScrollView } from '../common/CardScrollView';
+import { screenSaverCardPalette } from '../common/CardTheme';
 import { ScreensaverCardInstance, ScreensaverCardMode, ScreensaverInkTone } from '../model/ConfigModels';
 
 @ComponentV2
@@ -41,68 +46,154 @@ export struct ScreensaverCardHost {
    */
   @Param cardTone: ScreensaverInkTone = 'light';
   @Param cardHalo: boolean = false;
+  /** 仅屏保编辑态为 true：新卡片显示下箭头提示；首页/设置预览不显示。 */
+  @Param showOverflowHint: boolean = false;
   @Event onRequestConfig: () => void = (): void => {};
+
+  /** 溢出箭头颜色：跟随当前卡片墨色档，去掉黑底后仍可读。 */
+  private overflowHintColor(): string {
+    return screenSaverCardPalette(this.cardTone).textSecondary;
+  }
 
   build() {
     // 按类型分发到具体卡片视图；所有参数原样透传。
     // 内容密度不在这里透传：各卡片视图自己按 card.colSpan/rowSpan 查尺寸矩阵，
     // 避免 @Builder 多参数按值传递在 ForEach 复用时「传了但不刷新」的坑。
     if (this.card.cardType === 'photo') {
-      ScreensaverPhotoCard({
-        card: this.card,
-        cardMode: this.cardMode,
-        cardActive: this.cardActive,
-        cardTone: this.cardTone,
-        cardHalo: this.cardHalo
-      })
+      CardScrollView({
+        scrollEnabled: this.cardMode === 'play',
+        overflowHint: this.showOverflowHint,
+        hintColor: this.overflowHintColor(),
+        resetKey: `${this.card.id}-${this.cardMode}-photo`
+      }) {
+        ScreensaverPhotoCard({
+          card: this.card,
+          cardMode: this.cardMode,
+          cardActive: this.cardActive,
+          cardTone: this.cardTone,
+          cardHalo: this.cardHalo
+        })
+      }
     } else if (this.card.cardType === 'video') {
-      ScreensaverVideoCard({
-        card: this.card,
-        cardMode: this.cardMode,
-        cardActive: this.cardActive,
-        cardTone: this.cardTone,
-        cardHalo: this.cardHalo,
-        onRequestConfig: (): void => {
-          this.onRequestConfig();
-        }
-      })
+      CardScrollView({
+        scrollEnabled: this.cardMode === 'play',
+        overflowHint: this.showOverflowHint,
+        hintColor: this.overflowHintColor(),
+        resetKey: `${this.card.id}-${this.cardMode}-video`
+      }) {
+        ScreensaverVideoCard({
+          card: this.card,
+          cardMode: this.cardMode,
+          cardActive: this.cardActive,
+          cardTone: this.cardTone,
+          cardHalo: this.cardHalo,
+          onRequestConfig: (): void => {
+            this.onRequestConfig();
+          }
+        })
+      }
     } else if (this.card.cardType === 'git') {
-      ScreensaverGitCard({
-        card: this.card,
-        cardMode: this.cardMode,
-        cardActive: this.cardActive,
-        cardTone: this.cardTone,
-        cardHalo: this.cardHalo,
-        onRequestConfig: (): void => {
-          this.onRequestConfig();
-        }
-      })
+      CardScrollView({
+        scrollEnabled: this.cardMode === 'play',
+        overflowHint: this.showOverflowHint,
+        hintColor: this.overflowHintColor(),
+        resetKey: `${this.card.id}-${this.cardMode}-git`
+      }) {
+        ScreensaverGitCard({
+          card: this.card,
+          cardMode: this.cardMode,
+          cardActive: this.cardActive,
+          cardTone: this.cardTone,
+          cardHalo: this.cardHalo,
+          onRequestConfig: (): void => {
+            this.onRequestConfig();
+          }
+        })
+      }
     } else if (this.card.cardType === 'weather') {
-      ScreensaverWeatherCard({
+      CardScrollView({
+        scrollEnabled: this.cardMode === 'play',
+        overflowHint: this.showOverflowHint,
+        hintColor: this.overflowHintColor(),
+        resetKey: `${this.card.id}-${this.cardMode}-weather`
+      }) {
+        ScreensaverWeatherCard({
+          card: this.card,
+          cardMode: this.cardMode,
+          cardActive: this.cardActive,
+          cardTone: this.cardTone,
+          cardHalo: this.cardHalo,
+          onRequestConfig: (): void => {
+            this.onRequestConfig();
+          }
+        })
+      }
+    } else if (this.card.cardType === 'entry') {
+      CardScrollView({
+        scrollEnabled: this.cardMode === 'play',
+        overflowHint: this.showOverflowHint,
+        hintColor: this.overflowHintColor(),
+        resetKey: `${this.card.id}-${this.cardMode}-entry`
+      }) {
+        ScreensaverEntryCard({
+          card: this.card,
+          cardMode: this.cardMode,
+          cardTone: this.cardTone,
+          cardHalo: this.cardHalo
+        })
+      }
+    } else if (this.card.cardType === 'quotes') {
+      ScreensaverQuotesCard({
         card: this.card,
         cardMode: this.cardMode,
         cardActive: this.cardActive,
         cardTone: this.cardTone,
         cardHalo: this.cardHalo,
+        showOverflowHint: this.showOverflowHint,
         onRequestConfig: (): void => {
           this.onRequestConfig();
         }
       })
-    } else if (this.card.cardType === 'entry') {
-      ScreensaverEntryCard({
+    } else if (this.card.cardType === 'countdown') {
+      ScreensaverCountdownCard({
         card: this.card,
         cardMode: this.cardMode,
+        cardActive: this.cardActive,
         cardTone: this.cardTone,
-        cardHalo: this.cardHalo
+        cardHalo: this.cardHalo,
+        showOverflowHint: this.showOverflowHint,
+        onRequestConfig: (): void => {
+          this.onRequestConfig();
+        }
+      })
+    } else if (this.card.cardType === 'todo') {
+      ScreensaverTodoCard({
+        card: this.card,
+        cardMode: this.cardMode,
+        cardActive: this.cardActive,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo,
+        showOverflowHint: this.showOverflowHint,
+        onRequestConfig: (): void => {
+          this.onRequestConfig();
+        }
       })
     } else {
-      // 默认（含 'clock'）：时钟卡片不需要 active/onRequestConfig 参数
-      ScreensaverClockCard({
-        card: this.card,
-        cardMode: this.cardMode,
-        cardTone: this.cardTone,
-        cardHalo: this.cardHalo
-      })
+      // 默认（含 'clock'）：时钟卡片不需要 active/onRequestConfig 参数。
+      // 既有卡片只加“溢出即可滑动”能力，不改原有布局与视觉。
+      CardScrollView({
+        scrollEnabled: this.cardMode === 'play',
+        overflowHint: this.showOverflowHint,
+        hintColor: this.overflowHintColor(),
+        resetKey: `${this.card.id}-${this.cardMode}-clock`
+      }) {
+        ScreensaverClockCard({
+          card: this.card,
+          cardMode: this.cardMode,
+          cardTone: this.cardTone,
+          cardHalo: this.cardHalo
+        })
+      }
     }
   }
 }

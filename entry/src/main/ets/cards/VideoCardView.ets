@@ -110,10 +110,12 @@ export struct ScreensaverVideoCard {
     this.syncPlayback();
   }
 
-  /** 退后台：立即暂停播放。 */
+  /** 退后台/进编辑态立即暂停；回到屏保播放态按原设置恢复播放。 */
   @Monitor('cardActive')
   onActiveChanged(): void {
-    if (!this.cardActive) {
+    if (this.cardActive) {
+      this.syncPlayback();
+    } else {
       this.pausePlayback();
     }
   }

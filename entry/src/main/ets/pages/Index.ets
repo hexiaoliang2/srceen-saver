@@ -1,4 +1,4 @@
-﻿/**
+/**
  * =============================================================================
  * 应用首页（Index.ets）
  * =============================================================================
@@ -82,6 +82,20 @@ struct ScreenSaverConsole {
    * - 没有卡片：引导用户点添加。
    * 时钟卡给更高的行高（56），其它卡 44——时钟是主视觉，稍微突出。
    */
+  /** 首页预览高度：新内容卡需要容纳多行 + 免责声明，不能用 44 的旧高度。 */
+  private previewHeight(card: ScreensaverCardInstance): number {
+    if (card.cardType === 'clock') {
+      return 56;
+    }
+    if (card.cardType === 'quotes' || card.cardType === 'countdown') {
+      return 88;
+    }
+    if (card.cardType === 'todo') {
+      return 64;
+    }
+    return 44;
+  }
+
   @Builder
   previewCard() {
     Column({ space: 6 }) {
@@ -95,7 +109,7 @@ struct ScreenSaverConsole {
             })
           }
           .width('100%')
-          .height(card.cardType === 'clock' ? 56 : 44)
+          .height(this.previewHeight(card))
           .borderRadius(8)
           .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
           .clip(true)
@@ -106,7 +120,7 @@ struct ScreenSaverConsole {
               .fontColor(SCREEN_SAVER_COLORS.textTertiary)
           }
           .width('100%')
-          .height(card.cardType === 'clock' ? 56 : 44)
+          .height(this.previewHeight(card))
           .borderRadius(8)
           .border({
             width: 1,

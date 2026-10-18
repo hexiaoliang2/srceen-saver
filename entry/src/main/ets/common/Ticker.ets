@@ -32,6 +32,9 @@ export interface ScreenSaverTickListener {
   needsSecondTick: () => boolean;
 }
 
+/** 前后台状态监听：页面用它把 cardActive 同步到屏保可见性。 */
+export type ScreenSaverAppStateListener = (active: boolean) => void;
+
 // 两种基础间隔：1 秒 / 1 分钟（毫秒）。
 const SCREEN_SAVER_SECOND_INTERVAL_MS: number = 1000;
 const SCREEN_SAVER_MINUTE_INTERVAL_MS: number = 60000;
@@ -43,6 +46,8 @@ const SCREEN_SAVER_MINUTE_INTERVAL_MS: number = 60000;
 class ScreenSaverTickerService {
   /** 已注册的监听者列表（时钟卡片、预览里的时钟等）。 */
   private listeners: ScreenSaverTickListener[] = [];
+  /** 前后台状态监听者（屏保页用它停掉行情轮询/倒计时请求）。 */
+  private appStateListeners: ScreenSaverAppStateListener[] = [];
   /** 当前 setTimeout 的句柄，-1 表示没有排定的任务。 */
   private timerId: number = -1;
   /** 应用是否在前台。后台时挂起心跳，省电。 */
@@ -63,6 +68,20 @@ class ScreenSaverTickerService {
     }
   }
 
+  /** 注册前后台状态监听（页面 aboutToDisappear 时必须注销）。 */
+  addAppStateListener(listener: ScreenSaverAppStateListener): void {
+    if (this.appStateListeners.indexOf(listener) < 0) {
+      this.appStateListeners.push(listener);
+    }
+  }
+
+  removeAppStateListener(listener: ScreenSaverAppStateListener): void {
+    const index = this.appStateListeners.indexOf(listener);
+    if (index >= 0) {
+      this.appStateListeners.splice(index, 1);
+    }
+  }
+
   /**
    * 前后台切换时由 EntryAbility 调用。
    * 回前台时先手动 fire() 一次：因为后台期间心跳停了，
@@ -74,6 +93,9 @@ class ScreenSaverTickerService {
     }
     this.appActive = active;
     ScreenSaverLogger.info(`ticker app active: ${active}`);
+    for (const listener of this.appStateListeners) {
+      listener(active);
+    }
     if (active && this.listeners.length > 0) {
       this.fire();
     }

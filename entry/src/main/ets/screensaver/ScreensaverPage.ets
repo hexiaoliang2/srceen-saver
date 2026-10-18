@@ -45,6 +45,7 @@ import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { ScreenSaverLogger } from '../common/Logger';
+import { ScreenSaverAppStateListener, screenSaverTicker } from '../common/Ticker';
 import { screenSaverWindowController } from '../common/WindowController';
 import { screenSaverVibration } from '../common/VibrationHelper';
 import { screenSaverVideoThumb } from '../common/VideoThumb';
@@ -91,6 +92,9 @@ import { ScreenSaverVideoSettingsPanel } from './sheets/VideoSettingsSheet';
 import { ScreenSaverGitSettingsPanel } from './sheets/GitSettingsSheet';
 import { ScreenSaverWeatherSettingsPanel } from './sheets/WeatherSettingsSheet';
 import { ScreenSaverEntrySettingsPanel } from './sheets/EntrySettingsSheet';
+import { ScreenSaverQuotesSettingsPanel } from './sheets/QuotesSettingsSheet';
+import { ScreenSaverCountdownSettingsPanel } from './sheets/CountdownSettingsSheet';
+import { ScreenSaverTodoSettingsPanel } from './sheets/TodoSettingsSheet';
 import {
   SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
   SCREEN_SAVER_GRID_COLS,
@@ -304,6 +308,10 @@ export struct ScreenSaverPlayPage {
   private widePositions: ScreensaverGridPos[] = [];
   /** 断点观察者（监听窗口宽度变化切换网格规格）。 */
   private breakpointObserver: ScreenSaverBreakpointObserver = new ScreenSaverBreakpointObserver();
+  /** 前后台切换：退后台立即把 pageActive 置 false，让行情轮询/网络请求停下。 */
+  private appStateListener: ScreenSaverAppStateListener = (active: boolean): void => {
+    this.pageActive = active;
+  };
 
   /**
    * 页面出现：
@@ -345,6 +353,7 @@ export struct ScreenSaverPlayPage {
     this.refreshCardSkin();
     this.startBurnInTimer();
     this.startBatteryWatch();
+    screenSaverTicker.addAppStateListener(this.appStateListener);
   }
 
   /**
@@ -404,6 +413,7 @@ export struct ScreenSaverPlayPage {
     this.stopCapsuleTimer();
     this.stopBurnInTimer();
     this.stopBatteryWatch();
+    screenSaverTicker.removeAppStateListener(this.appStateListener);
     this.breakpointObserver.stop();
     this.pageActive = false;
     const context = this.getUIContext().getHostContext();
@@ -1583,6 +1593,39 @@ export struct ScreenSaverPlayPage {
             this.closeSheet();
           }
         })
+      } else if (this.sheetKind === 'quotes') {
+        ScreenSaverQuotesSettingsPanel({
+          card: this.sheetCard(),
+          onDone: (): void => {
+            this.closeSheet();
+          },
+          onDelete: (): void => {
+            this.removeSheetCard();
+            this.closeSheet();
+          }
+        })
+      } else if (this.sheetKind === 'countdown') {
+        ScreenSaverCountdownSettingsPanel({
+          card: this.sheetCard(),
+          onDone: (): void => {
+            this.closeSheet();
+          },
+          onDelete: (): void => {
+            this.removeSheetCard();
+            this.closeSheet();
+          }
+        })
+      } else if (this.sheetKind === 'todo') {
+        ScreenSaverTodoSettingsPanel({
+          card: this.sheetCard(),
+          onDone: (): void => {
+            this.closeSheet();
+          },
+          onDelete: (): void => {
+            this.removeSheetCard();
+            this.closeSheet();
+          }
+        })
       }
     }
     .width('100%')
@@ -1617,6 +1660,11 @@ export struct ScreenSaverPlayPage {
    * 另外所有卡片都保留 `.clip(true)`：即使圆形裁剪为 0，
    * 内容仍被限制在卡片边界内，不会因去边框而溢出。
    */
+  /** 播放态是否显示卡片细边框（全局设置，默认关闭 = 透明边框）。 */
+  private showCardBorder(): boolean {
+    return !this.editMode && screenSaverAppModel.layout.settings.showCardBorder;
+  }
+
   private cardClipRadius(card: ScreensaverCardInstance): number {
     if (card.cardType === 'photo' || card.cardType === 'video') {
       return 0;
@@ -1660,6 +1708,7 @@ export struct ScreenSaverPlayPage {
           cardActive: this.pageActive && !this.editMode,
           cardTone: this.inkTone,
           cardHalo: this.inkHalo,
+          showOverflowHint: this.editMode,
           onRequestConfig: (): void => {
             // 卡片内部按钮（视频「重选」/ Git「重试」）→ 打开「这张卡片」的设置面板。
             // 显式传 cardId，不再经过 selectedCardId 中转（缺陷 1 的同类隐患）。
@@ -1784,6 +1833,11 @@ export struct ScreenSaverPlayPage {
     // 变更项 1/3.1：所有卡片统一「无卡面底色、无描边、无阴影/发光/遮罩」。
     // 圆角裁剪策略见 cardClipRadius（相册/视频不裁剪，内容自行定形；其余保留作溢出保护）。
     .borderRadius(this.cardClipRadius(card))
+    .border({
+      width: this.showCardBorder() ? 1 : 0,
+      color: this.inkPalette().cardBorder,
+      radius: this.cardClipRadius(card)
+    })
     .backgroundColor(Color.Transparent)
     .clip(true)
     // 播放态：卡片自身 Transparent，触摸透传给整页（点击唤胶囊）；

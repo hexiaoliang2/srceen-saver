@@ -206,6 +206,88 @@ const ENTRY_SIZE_SPEC: ScreensaverCardSizeSpec = {
   ]
 };
 
+// ---------------- 行情（本次新增）：1×1 起，最大 4×4 ----------------
+// 理由：1×1 只放名称+涨跌幅；价格/涨跌额/时间/来源需要更多行高。
+// 所有 13 档标准尺寸 + 1×2/1×3/1×4 窄条全部登记，内容超出时由 CardScrollView 纵向滚动。
+const QUOTES_SIZE_SPEC: ScreensaverCardSizeSpec = {
+  minColSpan: 1,
+  minRowSpan: 1,
+  maxColSpan: 4,
+  maxRowSpan: 4,
+  entries: [
+    { colSpan: 1, rowSpan: 1, density: 'minimal', presetLabel: '1×1' },
+    { colSpan: 2, rowSpan: 1, density: 'compact', presetLabel: '2×1' },
+    { colSpan: 3, rowSpan: 1, density: 'compact', presetLabel: '3×1' },
+    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '4×1' },
+    { colSpan: 1, rowSpan: 2, density: 'compact', presetLabel: '1×2' },
+    { colSpan: 1, rowSpan: 3, density: 'minimal', presetLabel: '' },
+    { colSpan: 1, rowSpan: 4, density: 'minimal', presetLabel: '' },
+    { colSpan: 2, rowSpan: 2, density: 'compact', presetLabel: '2×2' },
+    { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '3×2' },
+    { colSpan: 4, rowSpan: 2, density: 'full', presetLabel: '4×2' },
+    { colSpan: 2, rowSpan: 3, density: 'compact', presetLabel: '2×3' },
+    { colSpan: 3, rowSpan: 3, density: 'full', presetLabel: '3×3' },
+    { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '4×3' },
+    { colSpan: 2, rowSpan: 4, density: 'compact', presetLabel: '2×4' },
+    { colSpan: 3, rowSpan: 4, density: 'full', presetLabel: '3×4' },
+    { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '4×4' }
+  ]
+};
+
+// ---------------- 倒计时（本次新增）：1×1 起，最大 4×4 ----------------
+// 理由：1×1 只放“还剩 X 天”+ 第一条名称；目标日期/全部条目从 1×2/2×2 起逐步展开。
+const COUNTDOWN_SIZE_SPEC: ScreensaverCardSizeSpec = {
+  minColSpan: 1,
+  minRowSpan: 1,
+  maxColSpan: 4,
+  maxRowSpan: 4,
+  entries: [
+    { colSpan: 1, rowSpan: 1, density: 'minimal', presetLabel: '1×1' },
+    { colSpan: 2, rowSpan: 1, density: 'compact', presetLabel: '2×1' },
+    { colSpan: 3, rowSpan: 1, density: 'compact', presetLabel: '3×1' },
+    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '4×1' },
+    { colSpan: 1, rowSpan: 2, density: 'compact', presetLabel: '1×2' },
+    { colSpan: 1, rowSpan: 3, density: 'minimal', presetLabel: '' },
+    { colSpan: 1, rowSpan: 4, density: 'minimal', presetLabel: '' },
+    { colSpan: 2, rowSpan: 2, density: 'full', presetLabel: '2×2' },
+    { colSpan: 3, rowSpan: 2, density: 'full', presetLabel: '3×2' },
+    { colSpan: 4, rowSpan: 2, density: 'full', presetLabel: '4×2' },
+    { colSpan: 2, rowSpan: 3, density: 'full', presetLabel: '2×3' },
+    { colSpan: 3, rowSpan: 3, density: 'full', presetLabel: '3×3' },
+    { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '4×3' },
+    { colSpan: 2, rowSpan: 4, density: 'full', presetLabel: '2×4' },
+    { colSpan: 3, rowSpan: 4, density: 'full', presetLabel: '3×4' },
+    { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '4×4' }
+  ]
+};
+
+// ---------------- 待办（本次新增）：1×1 起，最大 4×4 ----------------
+// 理由：1×1 只放未完成数量；1×2 起显示列表；full 档补完成/总数。
+const TODO_SIZE_SPEC: ScreensaverCardSizeSpec = {
+  minColSpan: 1,
+  minRowSpan: 1,
+  maxColSpan: 4,
+  maxRowSpan: 4,
+  entries: [
+    { colSpan: 1, rowSpan: 1, density: 'minimal', presetLabel: '1×1' },
+    { colSpan: 2, rowSpan: 1, density: 'compact', presetLabel: '2×1' },
+    { colSpan: 3, rowSpan: 1, density: 'compact', presetLabel: '3×1' },
+    { colSpan: 4, rowSpan: 1, density: 'compact', presetLabel: '4×1' },
+    { colSpan: 1, rowSpan: 2, density: 'compact', presetLabel: '1×2' },
+    { colSpan: 1, rowSpan: 3, density: 'minimal', presetLabel: '' },
+    { colSpan: 1, rowSpan: 4, density: 'compact', presetLabel: '' },
+    { colSpan: 2, rowSpan: 2, density: 'compact', presetLabel: '2×2' },
+    { colSpan: 3, rowSpan: 2, density: 'compact', presetLabel: '3×2' },
+    { colSpan: 4, rowSpan: 2, density: 'full', presetLabel: '4×2' },
+    { colSpan: 2, rowSpan: 3, density: 'compact', presetLabel: '2×3' },
+    { colSpan: 3, rowSpan: 3, density: 'full', presetLabel: '3×3' },
+    { colSpan: 4, rowSpan: 3, density: 'full', presetLabel: '4×3' },
+    { colSpan: 2, rowSpan: 4, density: 'compact', presetLabel: '2×4' },
+    { colSpan: 3, rowSpan: 4, density: 'full', presetLabel: '3×4' },
+    { colSpan: 4, rowSpan: 4, density: 'full', presetLabel: '4×4' }
+  ]
+};
+
 /**
  * 六种卡片的元数据表（唯一数据源）。
  * unique=true 的卡片（时钟、Git）全局最多一张；相册、视频、天气、入口可加多张。
@@ -264,6 +346,33 @@ export const SCREEN_SAVER_CARD_CATALOG: ScreensaverCardMeta[] = [
     defaultColSpan: 2,
     defaultRowSpan: 1,
     sizeSpec: ENTRY_SIZE_SPEC
+  },
+  {
+    cardType: 'quotes',
+    displayName: '行情',
+    description: '自选标的最新价/涨跌幅（腾讯行情，需联网）',
+    unique: false,
+    defaultColSpan: 2,
+    defaultRowSpan: 2,
+    sizeSpec: QUOTES_SIZE_SPEC
+  },
+  {
+    cardType: 'countdown',
+    displayName: '倒计时',
+    description: '法定假期/调休与自定义倒数日（在线数据可离线缓存）',
+    unique: false,
+    defaultColSpan: 2,
+    defaultRowSpan: 2,
+    sizeSpec: COUNTDOWN_SIZE_SPEC
+  },
+  {
+    cardType: 'todo',
+    displayName: '待办',
+    description: '自带待办清单（零权限，数据随卡片持久化）',
+    unique: false,
+    defaultColSpan: 2,
+    defaultRowSpan: 2,
+    sizeSpec: TODO_SIZE_SPEC
   }
 ];
 

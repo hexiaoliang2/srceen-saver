@@ -362,6 +362,24 @@ export struct ScreenSaverSettingsPage {
           .borderRadius(10)
           .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
 
+          // ---------- 显示卡片边框 ----------
+          // 默认关闭 = 当前「透明边框」状态；开启后屏保页每张卡片显示细边框。
+          Column() {
+            ScreenSaverToggleRow({
+              label: '显示卡片边框',
+              tip: '关闭时卡片为透明边框（默认）；开启后屏保页每张卡片显示细边框',
+              isOn: screenSaverAppModel.layout.settings.showCardBorder,
+              onChange: (value: boolean): void => {
+                screenSaverAppModel.layout.settings.showCardBorder = value;
+                screenSaverAppModel.save();
+              }
+            })
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(10)
+          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+
           // ---------- 视频默认播放 ----------
           // 只影响「新添加」的视频卡片（已有卡片的开关不联动）。
           Column() {

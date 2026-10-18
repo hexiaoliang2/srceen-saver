@@ -84,6 +84,16 @@ export interface ScreensaverCardPalette {
   textTertiary: string;
   /** 投影兜底色（8 位 ARGB）：浅色文字配深影，深色文字配浅影。 */
   halo: string;
+  /** 行情涨跌配色：上涨 / 下跌 / 平盘（红涨绿跌时 up=红、down=绿）。 */
+  quoteUp: string;
+  quoteDown: string;
+  quoteFlat: string;
+  /** 倒计时“休 / 班”/行情状态标签的半透明底色（元素级，不是卡片底板）。 */
+  restTag: string;
+  workTag: string;
+  tagBackground: string;
+  /** 可选的卡片细描边（“显示卡片边框”开启时使用；默认透明无边框）。 */
+  cardBorder: string;
   /** 应用入口卡「中性图标」的首字色与 6 档底色。 */
   iconInitial: string;
   iconTints: string[];
@@ -107,6 +117,13 @@ export const SCREEN_SAVER_CARD_PALETTES: Record<ScreensaverInkTone, ScreensaverC
     textSecondary: '#D6D6D6',
     textTertiary: '#ABABAB',
     halo: '#CC000000',
+    quoteUp: '#FF6B6B',
+    quoteDown: '#4CD97B',
+    quoteFlat: '#D6D6D6',
+    restTag: '#4CD97B',
+    workTag: '#F2B75E',
+    tagBackground: '#22FFFFFF',
+    cardBorder: '#59FFFFFF',
     iconInitial: '#1B1B1B',
     iconTints: ['#AFC3D4', '#BFD2C2', '#D9C3A8', '#C6BCD9', '#D9B4BE', '#AFD0D6'],
     gitLevelsGreen: ['', '#0E4429', '#006D32', '#26A641', '#39D353'],
@@ -128,6 +145,13 @@ export const SCREEN_SAVER_CARD_PALETTES: Record<ScreensaverInkTone, ScreensaverC
     textSecondary: '#3D3D3D',
     textTertiary: '#5F5F5F',
     halo: '#CCFFFFFF',
+    quoteUp: '#C62828',
+    quoteDown: '#1B7F3A',
+    quoteFlat: '#3D3D3D',
+    restTag: '#1B7F3A',
+    workTag: '#B26A00',
+    tagBackground: '#14000000',
+    cardBorder: '#59000000',
     iconInitial: '#F7F7F7',
     iconTints: ['#3F5A75', '#3F6B52', '#6E4F2F', '#544569', '#6E3D48', '#2F5F6B'],
     gitLevelsGreen: ['', '#0E4429', '#1B7F3A', '#249449', '#2E9E4C'],
