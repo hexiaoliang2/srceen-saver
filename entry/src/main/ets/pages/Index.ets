@@ -5,174 +5,174 @@
  *
  * 【这个文件是干什么的】
  * 应用入口页面，由两部分组成：
- *   1. ScreenSaverConsole：首页主界面（控制台）——
- *      布局预览、「开启屏保」大按钮、「我的卡片」实例列表（含启停开关）、
- *      添加卡片入口、设置入口；
- *   2. Index（@Entry）：真正注册到路由表里的页面，只负责搭 Navigation
- *      导航框架，把控制台作为首页内容挂上去。
+ *   1. ScreenSaverConsole：首页控制台——两个一键开启按钮（竖屏 / 横屏）
+ *      + 全局设置入口；
+ *   2. Index（@Entry）：注册到路由表里的页面，搭 Navigation 导航框架。
  *
- * 【为什么拆成两个 struct】
- * @Entry 页面必须是唯一的，而首页内容较复杂。拆开后：
- *   - ScreenSaverConsole 专注界面（作为 Navigation 的首页内容）；
- *   - Index 专注导航（navDestination 的路由映射 pageMap 也在这里）。
+ * 【本轮变化（横屏模式）】
+ *   - 首页移除「我的卡片」列表、启停开关与添加卡片入口；
+ *     卡片增删/排序/尺寸/内容配置全部迁到方向设置页
+ *     （屏保页长按 600ms 进入，或首页预检失败时跳转）。
+ *   - 「开启屏保」拆成「开启竖屏屏保 / 开启横屏屏保」。
+ *   - 进入屏保前先做预检：空布局 / 越界布局 → 提示并跳方向设置页；
+ *     通过后先切窗口方向，切向失败留在首页。
  *
- * 【导航架构（新手必读）】
- * 本应用用 Navigation + NavDestination 路由：
- *   - Index 持有全局唯一的 NavPathStack（导航栈）；
- *   - 想去哪个页面就 pushPathByName('路由名', 参数)；
- *   - pageMap 里声明每个路由名对应的页面组件：
- *       screensaver → 屏保播放页
- *       settings    → 设置页
- *       guide       → 新手引导页
- *       library     → 卡片库页
- *   - 各目标页面以 NavDestination 为根节点（见各页面文件）。
- *
- * 【首次启动逻辑】
- * 数据加载完成（whenLoaded）后检查引导标记：
- * 没完成过引导就自动 push guide 页——保证第一次打开先看到引导。
+ * 【导航架构】
+ *   Navigation + NavPathStack：
+ *     screensaver  → 屏保播放页（参数带 mode）
+ *     modeSettings → 方向设置页（参数带 mode）
+ *     settings     → 全局设置页
+ *     guide        → 新手引导页
  * =============================================================================
  */
 
+import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { SCREEN_SAVER_COLORS } from '../common/ScreenSaverStyle';
+import { screenSaverWindowController } from '../common/WindowController';
 import { screenSaverAppModel } from '../model/AppModel';
-import { ScreensaverCardHost } from '../cards/CardHost';
 import { ScreenSaverPlayPage } from '../screensaver/ScreensaverPage';
+import { ScreenSaverModeSettingsPage } from '../screensaver/ModeSettingsPage';
 import { ScreenSaverSettingsPage } from '../screensaver/SettingsPage';
 import { ScreenSaverGuidePage } from '../screensaver/GuidePage';
-import { ScreenSaverCardLibraryPage } from '../screensaver/CardLibraryPage';
-import { ScreensaverLaunchParam, ScreensaverCardInstance } from '../model/ConfigModels';
+import {
+  ScreensaverLaunchParam,
+  ScreenSaverModeSettingsParam,
+  ScreenSaverOrientation,
+  screenSaverOrientationLabel
+} from '../model/ConfigModels';
 
 /**
- * 首页控制台：所有卡片管理的入口界面。
+ * 首页控制台：一键开启（竖屏 / 横屏）+ 全局设置。
  */
 @ComponentV2
 struct ScreenSaverConsole {
   @Param navStack: NavPathStack = new NavPathStack();
-
-  /** 进入屏保播放页（带来源标记，方便日志追踪从哪进的）。 */
-  private startScreensaver(): void {
-    const param: ScreensaverLaunchParam = { from: 'home' };
-    this.navStack.pushPathByName('screensaver', param);
-  }
-
   /**
-   * 卡片显示名：委托给 AppModel.cardInstanceTitle（与设置面板共用同一套
-   * 命名规则），同类型有多张时自动带序号。
+   * 外部刷新信号：数据加载完成 / 从设置页返回首页时自增，
+   * 强制重新计算两个方向的卡片数量（卡片数组的原地增删不一定会触发观察）。
    */
-  private cardTitle(card: ScreensaverCardInstance): string {
-    return screenSaverAppModel.cardInstanceTitle(card);
-  }
+  @Param dataTick: number = 0;
+  /** 切换方向是异步的：防重复点击，避免连续 push 两个屏保页。 */
+  @Local starting: boolean = false;
 
-  /** 弹 toast 提示。 */
   private toast(message: string): void {
     try {
-      this.getUIContext().getPromptAction().showToast({ message: message, duration: 1500 });
+      this.getUIContext().getPromptAction().showToast({ message: message, duration: 1600 });
     } catch (err) {
       const error = err as Error;
       ScreenSaverLogger.warn(`toast failed: ${error.message}`);
     }
   }
 
+  /** 跳转当前方向设置页（首页不直接管卡片）。 */
+  private openModeSettings(mode: ScreenSaverOrientation): void {
+    screenSaverAppModel.setActiveOrientation(mode);
+    const param: ScreenSaverModeSettingsParam = { from: 'home', mode: mode };
+    this.navStack.pushPathByName('modeSettings', param);
+  }
+
   /**
-   * 布局预览卡片：展示前 3 张卡的真实效果。
-   * - 启用的卡：直接渲染真实的卡片组件（edit 模式、不激活——
-   *   预览里不轮播、不请求网络，纯静态展示且省电）；
-   * - 停用的卡：虚线边框占位（和屏保里的停用样式一致）；
-   * - 没有卡片：引导用户点添加。
-   * 时钟卡给更高的行高（56），其它卡 44——时钟是主视觉，稍微突出。
+   * 开启屏保：
+   *   1. 空布局 → 提示 + 跳该方向设置页（不进入）；
+   *   2. 布局越界/重叠 → 提示 + 跳设置页；
+   *   3. 先切窗口方向，失败留在首页；
+   *   4. 通过后 push 屏保页（路由参数带 mode）。
    */
-  /** 首页预览高度：新内容卡需要容纳多行 + 免责声明，不能用 44 的旧高度。 */
-  private previewHeight(card: ScreensaverCardInstance): number {
-    if (card.cardType === 'clock') {
-      return 56;
+  private async startScreensaver(mode: ScreenSaverOrientation): Promise<void> {
+    if (this.starting) {
+      return;
     }
-    if (card.cardType === 'quotes' || card.cardType === 'countdown') {
-      return 88;
+    const label = screenSaverOrientationLabel(mode);
+    screenSaverAppModel.setActiveOrientation(mode);
+    if (!screenSaverAppModel.modeHasCards(mode)) {
+      this.toast(`${label}还没有卡片，请先添加`);
+      this.openModeSettings(mode);
+      return;
     }
-    if (card.cardType === 'todo') {
-      return 64;
+    if (!screenSaverAppModel.layoutFitsMode(mode)) {
+      this.toast(`${label}布局超出范围，请先调整卡片`);
+      this.openModeSettings(mode);
+      return;
     }
-    return 44;
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+    if (context === undefined) {
+      this.toast('无法获取窗口，请重试');
+      return;
+    }
+    this.starting = true;
+    const orientationOk = await screenSaverWindowController.applyOrientation(context, mode);
+    this.starting = false;
+    if (!orientationOk) {
+      this.toast(`无法切换到${label}，请检查系统方向设置`);
+      return;
+    }
+    const param: ScreensaverLaunchParam = { from: 'home', mode: mode };
+    ScreenSaverLogger.info(`start screensaver: ${mode}`);
+    this.navStack.pushPathByName('screensaver', param);
   }
 
-  @Builder
-  previewCard() {
-    Column({ space: 6 }) {
-      ForEach(screenSaverAppModel.layout.cards.slice(0, 3), (card: ScreensaverCardInstance) => {
-        if (card.enabled) {
-          Column() {
-            ScreensaverCardHost({
-              card: card,
-              cardMode: 'edit',
-              cardActive: false
-            })
-          }
-          .width('100%')
-          .height(this.previewHeight(card))
-          .borderRadius(8)
-          .backgroundColor(SCREEN_SAVER_COLORS.cardBg)
-          .clip(true)
-        } else {
-          Row() {
-            Text(`${this.cardTitle(card)} · 已停用`)
-              .fontSize(11)
-              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-          }
-          .width('100%')
-          .height(this.previewHeight(card))
-          .borderRadius(8)
-          .border({
-            width: 1,
-            color: '#33FFFFFF',
-            style: BorderStyle.Dashed
-          })
-          .justifyContent(FlexAlign.Center)
-        }
-      }, (card: ScreensaverCardInstance): string => card.id)
-      if (screenSaverAppModel.layout.cards.length === 0) {
-        Text('还没有卡片 · 点「＋ 添加卡片」加入')
-          .fontSize(12)
-          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-          .height(56)
-      }
-      Row() {
-        Text(`当前布局 · ${screenSaverAppModel.layout.cards.length} 张卡片`)
-          .fontSize(11)
-          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-      }
-      .width('100%')
+  /**
+   * 卡片数量文案：读取 cardsRevision 建立观察依赖。
+   * 卡片数组的 push/splice 不会自动触发首页刷新，所以增删/排序时
+   * AppModel 会自增该版本号，首页据此重新计算数量。
+   */
+  private cardCountText(mode: ScreenSaverOrientation): string {
+    const layout = screenSaverAppModel.layoutForMode(mode);
+    const revision = layout.cardsRevision;
+    if (revision < 0 || this.dataTick < 0) {
+      return '';
     }
-    .width('100%')
-    .padding(12)
-    .borderRadius(12)
-    .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+    return `${layout.cards.length} 张卡片 · 长按屏保页可编辑`;
   }
 
-  /** 「＋ 添加卡片」入口行：跳转到卡片库页面。 */
+  /**
+   * 开启按钮使用「无参数 @Builder」：标题与数量文案直接写在 build 体内。
+   * 多参数 @Builder 的字符串参数在组件复用时可能保持旧值（实测数量不刷新），
+   * 因此这里不把数量当参数传。
+   */
   @Builder
-  addCardRow() {
-    Row() {
-      Text('＋ 添加卡片')
-        .fontSize(14)
-        .fontColor(SCREEN_SAVER_COLORS.accent)
+  startPortraitButton() {
+    Column({ space: 3 }) {
+      Text('开启竖屏屏保')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(SCREEN_SAVER_COLORS.white)
+      Text(this.cardCountText(ScreenSaverOrientation.Portrait))
+        .fontSize(11)
+        .fontColor('#CCD8FF')
     }
     .width('100%')
-    .justifyContent(FlexAlign.Center)
-    .padding({ top: 13, bottom: 13 })
-    .borderRadius(10)
-    .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+    .padding({ top: 14, bottom: 14 })
+    .borderRadius(26)
+    .backgroundColor(SCREEN_SAVER_COLORS.accentStrong)
+    .opacity(this.starting ? 0.6 : 1)
     .onClick((): void => {
-      this.navStack.pushPathByName('library', '');
+      void this.startScreensaver(ScreenSaverOrientation.Portrait);
     })
   }
 
-  /**
-   * 控制台主界面（自上而下）：
-   *   标题区 → 布局预览 → 「开启屏保」主按钮 → 「我的卡片」列表 →
-   *   添加入口 → 设置入口 → 版本脚注。
-   * 整体放在 Scroll 里：卡片多时可以滚动。
-   */
+  @Builder
+  startLandscapeButton() {
+    Column({ space: 3 }) {
+      Text('开启横屏屏保')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(SCREEN_SAVER_COLORS.white)
+      Text(this.cardCountText(ScreenSaverOrientation.Landscape))
+        .fontSize(11)
+        .fontColor('#CCD8FF')
+    }
+    .width('100%')
+    .padding({ top: 14, bottom: 14 })
+    .borderRadius(26)
+    .backgroundColor(SCREEN_SAVER_COLORS.accentStrong)
+    .opacity(this.starting ? 0.6 : 1)
+    .onClick((): void => {
+      void this.startScreensaver(ScreenSaverOrientation.Landscape);
+    })
+  }
+
   build() {
     Scroll() {
       Column({ space: 14 }) {
@@ -183,79 +183,31 @@ struct ScreenSaverConsole {
             .fontWeight(FontWeight.Medium)
             .fontColor(SCREEN_SAVER_COLORS.textPrimary)
             .width('100%')
-          Text('应用内全屏展示')
+          Text('应用内全屏展示 · 竖屏 / 横屏独立布局')
             .fontSize(12)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .width('100%')
         }
         .width('100%')
 
-        // ---------- 布局预览 ----------
-        this.previewCard()
+        // ---------- 一键开启（两个方向） ----------
+        this.startPortraitButton()
 
-        // ---------- 「开启屏保」主按钮 ----------
-        Text('开启屏保')
-          .fontSize(16)
-          .fontColor(SCREEN_SAVER_COLORS.white)
+        this.startLandscapeButton()
+
+        Text('两个方向的卡片、布局与内容配置独立保存；背景、文字颜色、常亮为全局设置。')
+          .fontSize(11)
+          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
           .width('100%')
-          .textAlign(TextAlign.Center)
-          .padding({ top: 14, bottom: 14 })
-          .borderRadius(26)
-          .backgroundColor(SCREEN_SAVER_COLORS.accentStrong)
-          .onClick((): void => {
-            this.startScreensaver();
-          })
+          .padding({ left: 2, right: 2 })
 
-        // ---------- 「我的卡片」列表头 ----------
+        // ---------- 全局设置入口 ----------
         Row() {
-          Text('我的卡片')
-            .fontSize(15)
-            .fontColor(SCREEN_SAVER_COLORS.textPrimary)
-          Blank()
-          Text('开关控制是否显示')
-            .fontSize(11)
-            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-        }
-        .width('100%')
-
-        // ---------- 卡片实例列表 ----------
-        // 每张卡一行：标题（同类型带序号）+ 配置摘要 + 启停开关。
-        // 开关直接改 AppModel，布局数据自动持久化。
-        ForEach(screenSaverAppModel.layout.cards, (card: ScreensaverCardInstance) => {
-          Row() {
-            Column() {
-              Text(this.cardTitle(card))
-                .fontSize(14)
-                .fontColor(SCREEN_SAVER_COLORS.textPrimary)
-              Text(screenSaverAppModel.cardInstanceSummary(card))
-                .fontSize(11)
-                .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-                .margin({ top: 2 })
-            }
-            .alignItems(HorizontalAlign.Start)
-            .layoutWeight(1)
-            Toggle({ type: ToggleType.Switch, isOn: card.enabled })
-              .selectedColor(SCREEN_SAVER_COLORS.accentStrong)
-              .onChange((value: boolean): void => {
-                screenSaverAppModel.setCardEnabled(card.id, value);
-              })
-          }
-          .width('100%')
-          .padding(14)
-          .borderRadius(10)
-          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
-        }, (card: ScreensaverCardInstance): string => card.id)
-
-        // ---------- 添加卡片入口 ----------
-        this.addCardRow()
-
-        // ---------- 设置入口 ----------
-        Row() {
-          Text('设置')
+          Text('全局设置')
             .fontSize(14)
             .fontColor('#CCCCCC')
             .layoutWeight(1)
-          Text('间隔 / 字号 / 权限')
+          Text('背景 / 文字 / 常亮')
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
           Text('›')
@@ -283,6 +235,7 @@ struct ScreenSaverConsole {
     .width('100%')
     .height('100%')
     .scrollBar(BarState.Off)
+    .align(Alignment.Top)
     .backgroundColor(SCREEN_SAVER_COLORS.bg)
   }
 }
@@ -298,9 +251,13 @@ struct ScreenSaverConsole {
 struct Index {
   /** 全局导航栈：所有页面的跳转都靠它。 */
   @Local navStack: NavPathStack = new NavPathStack();
+  /** 首页数据版本：加载完成、返回首页时自增，刷新卡片数量文案。 */
+  @Local dataTick: number = 0;
 
   aboutToAppear(): void {
     screenSaverAppModel.whenLoaded((): void => {
+      // 布局加载完成：让首页重新计算两个方向的卡片数量。
+      this.dataTick += 1;
       if (!screenSaverAppModel.isGuideDone()) {
         this.navStack.pushPathByName('guide', '');
       }
@@ -309,30 +266,43 @@ struct Index {
 
   /**
    * 路由映射表：pushPathByName 的名字在这里对应到页面组件。
-   * 四个目标页面都以 NavDestination 为根（详见各页面文件）。
+   * 屏保页 / 方向设置页的方向取自 AppModel 的当前方向（入口已先设置），
+   * 同时 pushPathByName 的参数里也携带 mode（满足「路由必须带方向」）。
    */
   @Builder
   pageMap(name: string) {
     if (name === 'screensaver') {
-      ScreenSaverPlayPage({ navStack: this.navStack })
+      ScreenSaverPlayPage({
+        navStack: this.navStack,
+        mode: screenSaverAppModel.getActiveOrientation()
+      })
+    } else if (name === 'modeSettings') {
+      ScreenSaverModeSettingsPage({
+        navStack: this.navStack,
+        mode: screenSaverAppModel.getActiveOrientation()
+      })
     } else if (name === 'settings') {
       ScreenSaverSettingsPage({ navStack: this.navStack })
     } else if (name === 'guide') {
       ScreenSaverGuidePage({ navStack: this.navStack })
-    } else if (name === 'library') {
-      ScreenSaverCardLibraryPage({ navStack: this.navStack })
     }
   }
 
   build() {
     Navigation(this.navStack) {
       // Navigation 的首内容区：首页控制台
-      ScreenSaverConsole({ navStack: this.navStack })
+      ScreenSaverConsole({ navStack: this.navStack, dataTick: this.dataTick })
     }
-    .title('屏保')
-    .titleMode(NavigationTitleMode.Mini)
+    // 首页自带标题，不再重复显示系统标题栏/返回箭头
+    .hideTitleBar(true)
     .mode(NavigationMode.Stack)
     .navDestination(this.pageMap)
+    // 从设置页/屏保页返回首页时 NavBar 重新可见：刷新卡片数量
+    .onNavBarStateChange((visible: boolean): void => {
+      if (visible) {
+        this.dataTick += 1;
+      }
+    })
     .backgroundColor(SCREEN_SAVER_COLORS.bg)
   }
 }

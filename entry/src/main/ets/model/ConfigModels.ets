@@ -68,12 +68,36 @@ export type ScreensaverTextToneMode = 'auto' | 'dark' | 'light';
  */
 export type ScreensaverInkTone = 'light' | 'dark';
 
+/**
+ * 屏保方向（本轮新增）：竖屏 / 横屏。
+ * 全工程统一使用这个枚举，禁止散落的 'portrait' / 'landscape' 字符串判断。
+ * 两个方向各自持有独立的卡片实例、网格布局与内容配置（不同存储 key），
+ * 只有背景色 / 文字色 / 常亮等全局外观共享。
+ */
+export enum ScreenSaverOrientation {
+  Portrait = 'portrait',
+  Landscape = 'landscape'
+}
+
+/** 方向的中文名（标题、提示文案统一从这里取）。 */
+export function screenSaverOrientationLabel(mode: ScreenSaverOrientation): string {
+  return mode === ScreenSaverOrientation.Landscape ? '横屏' : '竖屏';
+}
+
 // ---------- 网格与断点常量 ----------
 /** 持久化数据的版本号：读盘时发现版本不符可做迁移或重置。 */
-export const SCREEN_SAVER_SCHEMA_VERSION: number = 4;
-// 手机档网格：4 列 × 8 行
+export const SCREEN_SAVER_SCHEMA_VERSION: number = 6;
+// 手机档网格：4 列 × 8 行（32 格）
 export const SCREEN_SAVER_GRID_COLS: number = 4;
 export const SCREEN_SAVER_GRID_ROWS: number = 8;
+// 横屏档网格：8 列 × 4 行（与竖屏一样是 32 格，方向对调）
+export const SCREEN_SAVER_LANDSCAPE_GRID_COLS: number = 8;
+export const SCREEN_SAVER_LANDSCAPE_GRID_ROWS: number = 4;
+// 横屏方向单卡最大跨度：宽度沿用既有 4 列上限，行数受 4 行网格约束
+export const SCREEN_SAVER_LANDSCAPE_CARD_MAX_COLS: number = 4;
+export const SCREEN_SAVER_LANDSCAPE_CARD_MAX_ROWS: number = 4;
+/** 屏保页长按进入方向设置页的判定时长（600ms，默认值）。 */
+export const SCREEN_SAVER_LONG_PRESS_MS: number = 600;
 // 折叠屏展开档：8 列 × 8 行
 export const SCREEN_SAVER_WIDE_COLS_FOLD: number = 8;
 export const SCREEN_SAVER_WIDE_ROWS_FOLD: number = 8;
@@ -286,9 +310,19 @@ export function screenSaverIsCanvasColor(value: string): boolean {
   option.value === value);
 }
 
-/** 启动参数：标记从哪里进入屏保（统计/日志用）。 */
+/**
+ * 启动参数：标记从哪里进入屏保（统计/日志用）+ 本次要展示的方向。
+ * 路由参数必须携带 mode；页面不得用 AppStorage / 全局变量推断方向。
+ */
 export interface ScreensaverLaunchParam {
   from: string;
+  mode: ScreenSaverOrientation;
+}
+
+/** 方向设置页的路由参数：要编辑哪个方向 + 来源（首页 / 屏保长按）。 */
+export interface ScreenSaverModeSettingsParam {
+  from: string;
+  mode: ScreenSaverOrientation;
 }
 
 /** Git 单日数据：日期 + 当天提交数。 */
@@ -601,6 +635,12 @@ export class ScreensaverLayout {
   @Trace schemaVersion: number = SCREEN_SAVER_SCHEMA_VERSION;
   @Trace settings: ScreensaverSettings = new ScreensaverSettings();
   @Trace cards: ScreensaverCardInstance[] = [];
+  /**
+   * 卡片数组的“版本号”：push/splice 这类原地修改不一定能触发
+   * 外层页面对 cards.length 的观察，增删/排序后自增一次，
+   * 让首页等未参与本次操作的页面也能刷新卡片数量。
+   */
+  @Trace cardsRevision: number = 0;
 }
 
 // =====================================================================
@@ -774,6 +814,8 @@ export interface ScreensaverRawPage {
 /** 布局文件的原始结构（settings 和 cards/pages 二选一形态都可能出现）。 */
 export interface ScreensaverRawLayout {
   schemaVersion?: number;
+  /** 该布局所属方向（portrait / landscape）；旧数据没有这个字段，默认竖屏。 */
+  orientation?: string;
   settings?: ScreensaverRawSettings;
   cards?: ScreensaverRawCard[];
   pages?: ScreensaverRawPage[];

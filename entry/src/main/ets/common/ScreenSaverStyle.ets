@@ -43,7 +43,7 @@ export interface ScreenSaverMetrics {
   handleHitSize: number;      // 编辑手柄的点击热区（比视觉尺寸大，好按）
   handleVisualSize: number;   // 编辑手柄的视觉尺寸
   snapThresholdVp: number;    // 拖拽小于这个距离视为「点按」而非移动
-  longPressMs: number;        // 长按判定时长（500ms 后进入编辑模式）
+  longPressMs: number;        // 长按判定时长（600ms 后进入当前方向设置页）
   capsuleAutoHideMs: number;  // 胶囊自动隐藏的延时
 }
 
@@ -76,7 +76,7 @@ export const SCREEN_SAVER_METRICS: ScreenSaverMetrics = {
   handleHitSize: 44,      // 44vp 是移动端公认的最小舒适热区
   handleVisualSize: 28,
   snapThresholdVp: 8,     // 8vp 内的位移不算拖拽，避免手指微颤误判
-  longPressMs: 500,
+  longPressMs: 600,       // 长按 600ms 进入当前方向设置页
   capsuleAutoHideMs: 2000
 };
 

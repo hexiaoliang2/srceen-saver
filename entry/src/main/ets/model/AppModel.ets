@@ -36,12 +36,19 @@ import {
   SCREEN_SAVER_CARD_CATALOG,
   screenSaverCardTypeName,
   screenSaverFindCardMeta,
+  screenSaverIsSizeAllowed,
   screenSaverSnapCardSize
 } from '../cards/CardCatalog';
 import {
+  SCREEN_SAVER_CARD_MAX_COLS,
+  SCREEN_SAVER_CARD_MAX_ROWS,
   SCREEN_SAVER_GIT_WEEK_OPTIONS,
   SCREEN_SAVER_GRID_COLS,
   SCREEN_SAVER_GRID_ROWS,
+  SCREEN_SAVER_LANDSCAPE_CARD_MAX_COLS,
+  SCREEN_SAVER_LANDSCAPE_CARD_MAX_ROWS,
+  SCREEN_SAVER_LANDSCAPE_GRID_COLS,
+  SCREEN_SAVER_LANDSCAPE_GRID_ROWS,
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
   SCREEN_SAVER_QUOTES_MAX_SYMBOLS,
   SCREEN_SAVER_SCHEMA_VERSION,
@@ -90,13 +97,15 @@ import {
   ScreensaverSettings,
   ScreensaverTodoItem,
   ScreensaverTradingCalendarData,
-  ScreensaverWeatherData
+  ScreensaverWeatherData,
+  ScreenSaverOrientation
 } from './ConfigModels';
 import { screenSaverNormalizeStoredQuotes } from './QuoteSymbols';
 
 // ---------- 持久化键名（Preferences 里的 key） ----------
 const SCREEN_SAVER_STORE_NAME: string = 'screen_saver_store';       // 偏好数据库文件名
-const SCREEN_SAVER_LAYOUT_KEY: string = 'screen_saver_layout_v2';   // 当前版本的布局数据
+const SCREEN_SAVER_LAYOUT_KEY: string = 'screen_saver_layout_v2';   // 竖屏布局（老数据默认归竖屏）
+const SCREEN_SAVER_LANDSCAPE_LAYOUT_KEY: string = 'screen_saver_layout_landscape_v5'; // 横屏布局（独立一套；v5 = 8×4 网格 + 铺满快照）
 const SCREEN_SAVER_LEGACY_KEY: string = 'screen_saver_config';      // 旧版本的键（迁移用）
 const SCREEN_SAVER_GUIDE_KEY: string = 'screen_saver_guide_done';   // 引导页是否已完成
 const SCREEN_SAVER_GIT_TOKEN_KEY: string = 'screen_saver_git_token';// GitHub 访问令牌
@@ -145,14 +154,34 @@ function screenSaverIsDateKey(value: string): boolean {
 }
 
 export class ScreensaverAppModel {
-  /** 布局根节点：全局设置 + 卡片数组。界面直接引用它来渲染（只读引用）。 */
-  readonly layout: ScreensaverLayout = new ScreensaverLayout();
+  /** 竖屏布局：卡片与网格位置（独立一套，存 screen_saver_layout_v2）。 */
+  readonly portraitLayout: ScreensaverLayout = new ScreensaverLayout();
+  /** 横屏布局：卡片与网格位置（独立一套，存 screen_saver_layout_landscape_v2）。 */
+  readonly landscapeLayout: ScreensaverLayout = new ScreensaverLayout();
+  /**
+   * 全局外观设置：背景色 / 图片 / 文字色档 / 常亮等两个方向共享。
+   * 两个布局的 settings 指向同一个对象，因此改一处两个方向同时生效；
+   * 卡片实例、位置、尺寸、内容配置仍然各自隔离。
+   */
+  private sharedSettings: ScreensaverSettings = new ScreensaverSettings();
+  /**
+   * 当前方向对应的布局（界面直接引用它渲染）。
+   * 切换方向时整体换引用，卡片读写方法无需知道方向。
+   */
+  layout: ScreensaverLayout = this.portraitLayout;
+  /** 当前方向：默认竖屏；进入屏保/设置页前由入口显式设置。 */
+  private activeOrientation: ScreenSaverOrientation = ScreenSaverOrientation.Portrait;
   /** 应用上下文：EntryAbility 启动时注入，供打开 Preferences 用。 */
   private abilityContext: common.UIAbilityContext | undefined = undefined;
   /** 偏好存储实例（懒加载，用 ensureStore 获取）。 */
   private store: preferences.Preferences | undefined = undefined;
   /** 防抖保存的定时器句柄，-1 表示当前没有待执行的保存。 */
   private saveTimer: number = -1;
+  /**
+   * 等待写盘的方向集合。save() 在调用时记录「当时的方向」，
+   * 这样切换方向后定时器不会把旧方向的改动写到新方向的 key 里。
+   */
+  private pendingSaveModes: ScreenSaverOrientation[] = [];
   /** load() 是否已完成。 */
   private loaded: boolean = false;
   /** 等待加载完成的回调队列（加载完成前注册的界面刷新等任务）。 */
@@ -171,6 +200,91 @@ export class ScreensaverAppModel {
   private holidayCache: Map<string, ScreensaverHolidayYear> = new Map<string, ScreensaverHolidayYear>();
   /** 交易日历缓存：只存法定节假日日期键，12h 有效（5s 轮询期间不再请求日历）。 */
   private tradingCalendarCache: ScreensaverTradingCalendarData | undefined = undefined;
+
+  constructor() {
+    // 两个方向共享同一份全局外观设置（背景/文字色/常亮等）。
+    this.portraitLayout.settings = this.sharedSettings;
+    this.landscapeLayout.settings = this.sharedSettings;
+    this.layout = this.portraitLayout;
+  }
+
+  /** 当前方向（进入屏保/设置页前由入口设置，页面不得用 AppStorage 推测）。 */
+  getActiveOrientation(): ScreenSaverOrientation {
+    return this.activeOrientation;
+  }
+
+  /** 切换当前方向：只换布局引用，pendingSaveModes 已按方向记录，不会串盘。 */
+  setActiveOrientation(mode: ScreenSaverOrientation): void {
+    this.activeOrientation = mode;
+    this.layout = this.layoutForMode(mode);
+    ScreenSaverLogger.info(`orientation active: ${mode}`);
+  }
+
+  /** 按方向取布局（快照初始化、预检、保存都要用）。 */
+  layoutForMode(mode: ScreenSaverOrientation): ScreensaverLayout {
+    return mode === ScreenSaverOrientation.Landscape ? this.landscapeLayout : this.portraitLayout;
+  }
+
+  /** 当前方向的网格列数：竖屏沿用 4 列，横屏固定 5 列。 */
+  gridColumns(): number {
+    return this.activeOrientation === ScreenSaverOrientation.Landscape ?
+      SCREEN_SAVER_LANDSCAPE_GRID_COLS : SCREEN_SAVER_GRID_COLS;
+  }
+
+  /** 当前方向的网格行数：竖屏 8 行，横屏固定 2 行。 */
+  gridRows(): number {
+    return this.activeOrientation === ScreenSaverOrientation.Landscape ?
+      SCREEN_SAVER_LANDSCAPE_GRID_ROWS : SCREEN_SAVER_GRID_ROWS;
+  }
+
+  /** 当前方向单卡最大列跨度（横屏仍为 4 列）。 */
+  maxCardColSpan(): number {
+    return Math.min(SCREEN_SAVER_CARD_MAX_COLS, this.gridColumns());
+  }
+
+  /** 当前方向单卡最大行跨度（横屏受 2 行网格约束）。 */
+  maxCardRowSpan(): number {
+    return Math.min(SCREEN_SAVER_CARD_MAX_ROWS, this.gridRows());
+  }
+
+  /** 某方向是否已有卡片（首页开启前预检 / 空态跳设置）。 */
+  modeHasCards(mode: ScreenSaverOrientation): boolean {
+    return this.layoutForMode(mode).cards.length > 0;
+  }
+
+  /**
+   * 某方向的内存布局是否合法（越界 / 重叠检查）。
+   * 首页开启屏保前用它做「布局裁剪/越界」预检；正常数据永远为 true，
+   * 只有外部改坏磁盘数据或旧布局迁移异常时才会返回 false。
+   */
+  layoutFitsMode(mode: ScreenSaverOrientation): boolean {
+    const cards = this.layoutForMode(mode).cards;
+    const columns = mode === ScreenSaverOrientation.Landscape ?
+      SCREEN_SAVER_LANDSCAPE_GRID_COLS : SCREEN_SAVER_GRID_COLS;
+    const rows = mode === ScreenSaverOrientation.Landscape ?
+      SCREEN_SAVER_LANDSCAPE_GRID_ROWS : SCREEN_SAVER_GRID_ROWS;
+    const gridCards: ScreensaverCardInstance[] = [];
+    for (const card of cards) {
+      if (card.floating) {
+        continue;
+      }
+      if (card.colStart < 0 || card.rowStart < 0 || card.colSpan <= 0 || card.rowSpan <= 0 ||
+        card.colStart + card.colSpan > columns || card.rowStart + card.rowSpan > rows) {
+        return false;
+      }
+      for (const other of gridCards) {
+        const overlaps = card.colStart < other.colStart + other.colSpan &&
+          card.colStart + card.colSpan > other.colStart &&
+          card.rowStart < other.rowStart + other.rowSpan &&
+          card.rowStart + card.rowSpan > other.rowStart;
+        if (overlaps) {
+          return false;
+        }
+      }
+      gridCards.push(card);
+    }
+    return true;
+  }
 
   /** 注入应用上下文（EntryAbility onCreate 时调用一次）。 */
   attachContext(context: common.UIAbilityContext): void {
@@ -215,10 +329,20 @@ export class ScreensaverAppModel {
       ScreenSaverLogger.warn('load skipped: ability context is not attached');
       return;
     }
+    // 双方向布局重新装载：共享外观对象重新创建，旧卡片容器清空。
+    this.sharedSettings = new ScreensaverSettings();
+    this.portraitLayout.settings = this.sharedSettings;
+    this.landscapeLayout.settings = this.sharedSettings;
+    this.portraitLayout.cards = [];
+    this.landscapeLayout.cards = [];
+    this.pendingSaveModes = [];
+    this.setActiveOrientation(ScreenSaverOrientation.Portrait);
     try {
       const store = await this.ensureStore();
       if (store === undefined) {
         this.ensureDefaultLayout();
+        this.initializeLandscapeFromPortrait();
+        this.notifyLoaded();
         return;
       }
       // 读出的值类型不可信（preferences.ValueType 是联合类型），逐一校验。
@@ -250,7 +374,7 @@ export class ScreensaverAppModel {
       if (typeof layoutText === 'string' && layoutText.length > 0) {
         this.applyLayoutText(layoutText);
       } else {
-        // v2 键为空：尝试读旧版键，把老用户的数据迁移过来。
+        // v2 键为空：尝试读旧版键，把老用户的数据迁移过来（旧数据归竖屏）。
         const legacyText = await store.get(SCREEN_SAVER_LEGACY_KEY, '');
         if (typeof legacyText === 'string' && legacyText.length > 0) {
           this.applyLayoutText(legacyText);
@@ -258,34 +382,103 @@ export class ScreensaverAppModel {
           this.ensureDefaultLayout();
         }
       }
+      // 横屏布局：有独立 key 就读取；没有就做一次竖屏快照（幂等，只做一次）。
+      // 注意：读取横屏时不覆盖 settings —— 全局外观以竖屏装载的共享对象为准。
+      const landscapeText = await store.get(SCREEN_SAVER_LANDSCAPE_LAYOUT_KEY, '');
+      let landscapeInitialized = false;
+      if (typeof landscapeText === 'string' && landscapeText.length > 0) {
+        if (!this.applyLayoutTextTo(ScreenSaverOrientation.Landscape, landscapeText, false)) {
+          ScreenSaverLogger.warn('landscape layout parse failed, re-snapshot from portrait');
+          this.initializeLandscapeFromPortrait();
+          landscapeInitialized = true;
+        }
+      } else {
+        this.initializeLandscapeFromPortrait();
+        landscapeInitialized = true;
+      }
+      // 装载结束后回到竖屏（首页默认方向）。
+      this.setActiveOrientation(ScreenSaverOrientation.Portrait);
+      if (landscapeInitialized) {
+        void this.persistLayoutForMode(ScreenSaverOrientation.Landscape);
+      }
       this.notifyLoaded();
-      ScreenSaverLogger.info(`layout loaded: cards=${this.layout.cards.length}`);
+      ScreenSaverLogger.info(`layout loaded: portrait=${this.portraitLayout.cards.length} ` +
+        `landscape=${this.landscapeLayout.cards.length}`);
     } catch (err) {
       const error = err as Error;
       ScreenSaverLogger.error(`layout load failed: ${error.message}`);
       this.ensureDefaultLayout();
+      this.initializeLandscapeFromPortrait();
+      this.setActiveOrientation(ScreenSaverOrientation.Portrait);
       this.notifyLoaded();
     }
   }
 
-  /** 防抖保存：200ms 内的连续改动合并成一次写盘。 */
+  /**
+   * 防抖保存：200ms 内的连续改动合并成一次写盘。
+   * 记录「调用时的方向」而不是定时器触发时的方向：用户可能在 200ms 内
+   * 切换方向（如退出横屏马上进竖屏），否则旧方向的改动会被写到新方向 key。
+   */
   save(): void {
+    const modes: ScreenSaverOrientation[] = [this.activeOrientation];
+    // 全局外观（背景/文字色/常亮）两个方向共用：加载完成后任一方向保存
+    // 都把共享设置写进两个 key，避免「在横屏改外观、重启后被竖屏旧值覆盖」。
+    // 加载过程中只写当前方向，防止默认竖屏数据提前把横屏 key 写成空布局。
+    if (this.loaded) {
+      if (modes.indexOf(ScreenSaverOrientation.Portrait) < 0) {
+        modes.push(ScreenSaverOrientation.Portrait);
+      }
+      if (modes.indexOf(ScreenSaverOrientation.Landscape) < 0) {
+        modes.push(ScreenSaverOrientation.Landscape);
+      }
+    }
+    for (const mode of modes) {
+      if (this.pendingSaveModes.indexOf(mode) < 0) {
+        this.pendingSaveModes.push(mode);
+      }
+    }
     if (this.saveTimer >= 0) {
       clearTimeout(this.saveTimer);
     }
     this.saveTimer = setTimeout((): void => {
       this.saveTimer = -1;
-      void this.persistLayout();
+      const pendingModes = this.pendingSaveModes;
+      this.pendingSaveModes = [];
+      for (const pendingMode of pendingModes) {
+        void this.persistLayoutForMode(pendingMode);
+      }
     }, SCREEN_SAVER_SAVE_DEBOUNCE_MS);
   }
 
-  /** 立即写盘（跳过防抖）。退出屏保前/关键表单保存时调用，返回是否真正落盘。 */
+  /**
+   * 立即写盘（跳过防抖）。退出屏保前/关键表单保存时调用，返回是否真正落盘。
+   * 除当前方向外，也会把其它方向待写的数据一起刷掉（防止切换期间丢改动）。
+   */
   async flush(): Promise<boolean> {
     if (this.saveTimer >= 0) {
       clearTimeout(this.saveTimer);
       this.saveTimer = -1;
     }
-    return await this.persistLayout();
+    const modes = this.pendingSaveModes;
+    this.pendingSaveModes = [];
+    if (this.loaded) {
+      if (modes.indexOf(ScreenSaverOrientation.Portrait) < 0) {
+        modes.push(ScreenSaverOrientation.Portrait);
+      }
+      if (modes.indexOf(ScreenSaverOrientation.Landscape) < 0) {
+        modes.push(ScreenSaverOrientation.Landscape);
+      }
+    } else if (modes.indexOf(this.activeOrientation) < 0) {
+      modes.push(this.activeOrientation);
+    }
+    let activeSaved = true;
+    for (const mode of modes) {
+      const saved = await this.persistLayoutForMode(mode);
+      if (mode === this.activeOrientation) {
+        activeSaved = saved;
+      }
+    }
+    return activeSaved;
   }
 
   isGuideDone(): boolean {
@@ -597,8 +790,10 @@ export class ScreensaverAppModel {
     if (meta.unique && this.hasCardType(cardType)) {
       return `${meta.displayName}卡片最多添加一张`;
     }
-    // 默认尺寸放不下也拦截，提示用户先腾地方
-    if (this.findFreeSlot(meta.defaultColSpan, meta.defaultRowSpan) === undefined) {
+    // 默认尺寸按当前方向吸附（横屏上限 4×2），放不下也拦截并提示先腾地方
+    const entry = screenSaverSnapCardSize(cardType, meta.defaultColSpan, meta.defaultRowSpan,
+      this.maxCardColSpan(), this.maxCardRowSpan());
+    if (this.findFreeSlot(entry.colSpan, entry.rowSpan) === undefined) {
       return '空间不足：请先移出或缩小卡片';
     }
     return '';
@@ -616,12 +811,36 @@ export class ScreensaverAppModel {
     if (meta === undefined) {
       return false;
     }
-    const slot = this.findFreeSlot(meta.defaultColSpan, meta.defaultRowSpan);
+    const entry = screenSaverSnapCardSize(cardType, meta.defaultColSpan, meta.defaultRowSpan,
+      this.maxCardColSpan(), this.maxCardRowSpan());
+    const slot = this.findFreeSlot(entry.colSpan, entry.rowSpan);
     if (slot === undefined) {
       return false;
     }
-    const card = this.buildCard(cardType, slot.colStart, slot.rowStart, meta.defaultColSpan, meta.defaultRowSpan);
+    const card = this.buildCard(cardType, slot.colStart, slot.rowStart, entry.colSpan, entry.rowSpan);
     this.layout.cards.push(card);
+    this.layout.cardsRevision += 1;
+    this.save();
+    return true;
+  }
+
+  /**
+   * 调整卡片在列表中的顺序（方向设置页的「上移 / 下移」）。
+   * 顺序同时决定播放态的层级（后面的盖在前面），不改变网格坐标。
+   */
+  moveCardOrder(cardId: string, delta: number): boolean {
+    const index = this.layout.cards.findIndex((card: ScreensaverCardInstance): boolean => card.id === cardId);
+    if (index < 0) {
+      return false;
+    }
+    const target = index + delta;
+    if (target < 0 || target >= this.layout.cards.length) {
+      return false;
+    }
+    const card = this.layout.cards[index];
+    this.layout.cards.splice(index, 1);
+    this.layout.cards.splice(target, 0, card);
+    this.layout.cardsRevision += 1;
     this.save();
     return true;
   }
@@ -667,6 +886,7 @@ export class ScreensaverAppModel {
     const index = this.layout.cards.findIndex((card: ScreensaverCardInstance): boolean => card.id === cardId);
     if (index >= 0) {
       this.layout.cards.splice(index, 1);
+      this.layout.cardsRevision += 1;
       this.save();
     }
   }
@@ -681,6 +901,7 @@ export class ScreensaverAppModel {
     }
     if (kept.length !== this.layout.cards.length) {
       this.layout.cards = kept;
+      this.layout.cardsRevision += 1;
       this.save();
     }
   }
@@ -694,8 +915,8 @@ export class ScreensaverAppModel {
     if (card === undefined) {
       return false;
     }
-    const nextCol = screenSaverClampInt(card.colStart + deltaCol, 0, SCREEN_SAVER_GRID_COLS - card.colSpan);
-    const nextRow = screenSaverClampInt(card.rowStart + deltaRow, 0, SCREEN_SAVER_GRID_ROWS - card.rowSpan);
+    const nextCol = screenSaverClampInt(card.colStart + deltaCol, 0, this.gridColumns() - card.colSpan);
+    const nextRow = screenSaverClampInt(card.rowStart + deltaRow, 0, this.gridRows() - card.rowSpan);
     if (nextCol === card.colStart && nextRow === card.rowStart) {
       return false;
     }
@@ -765,8 +986,9 @@ export class ScreensaverAppModel {
       };
       return missing;
     }
+    // 按当前方向吸附：横屏方向请求 4×3/4×4 会被吸附到 4×2 以内。
     const entry = screenSaverSnapCardSize(card.cardType, colSpan, rowSpan,
-      SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
+      this.maxCardColSpan(), this.maxCardRowSpan());
     const snapped = entry.colSpan !== colSpan || entry.rowSpan !== rowSpan;
     const unchanged = entry.colSpan === card.colSpan && entry.rowSpan === card.rowSpan;
     const outcome: ScreensaverResizeResult = {
@@ -787,8 +1009,8 @@ export class ScreensaverAppModel {
       return outcome;
     }
     // 靠右/靠下的卡片放大后可能越界：把起点往回拉，保证不超出网格。
-    const nextColStart = Math.max(0, Math.min(card.colStart, SCREEN_SAVER_GRID_COLS - entry.colSpan));
-    const nextRowStart = Math.max(0, Math.min(card.rowStart, SCREEN_SAVER_GRID_ROWS - entry.rowSpan));
+    const nextColStart = Math.max(0, Math.min(card.colStart, this.gridColumns() - entry.colSpan));
+    const nextRowStart = Math.max(0, Math.min(card.rowStart, this.gridRows() - entry.rowSpan));
     const placed = this.placeCard(cardId, nextColStart, nextRowStart, entry.colSpan, entry.rowSpan);
     outcome.ok = placed;
     return outcome;
@@ -864,8 +1086,8 @@ export class ScreensaverAppModel {
     if (card.floatLocked) {
       return false;
     }
-    const cardW = canvasW * card.colSpan / SCREEN_SAVER_GRID_COLS;
-    const cardH = canvasH * card.rowSpan / SCREEN_SAVER_GRID_ROWS;
+    const cardW = canvasW * card.colSpan / this.gridColumns();
+    const cardH = canvasH * card.rowSpan / this.gridRows();
     card.floatX = Math.max(0, Math.min(Math.round(x), Math.max(0, canvasW - cardW)));
     card.floatY = Math.max(0, Math.min(Math.round(y), Math.max(0, canvasH - cardH)));
     this.save();
@@ -930,7 +1152,7 @@ export class ScreensaverAppModel {
     if (colStart < 0 || rowStart < 0 || colSpan <= 0 || rowSpan <= 0) {
       return false;
     }
-    if (colStart + colSpan > SCREEN_SAVER_GRID_COLS || rowStart + rowSpan > SCREEN_SAVER_GRID_ROWS) {
+    if (colStart + colSpan > this.gridColumns() || rowStart + rowSpan > this.gridRows()) {
       return false;
     }
     for (const card of this.layout.cards) {
@@ -1058,10 +1280,12 @@ export class ScreensaverAppModel {
     }
   }
 
-  /** 在手机网格 (4×8) 里找一个能放下 colSpan×rowSpan 的空位（添加卡片用）。 */
+  /** 在当前方向网格里找一个能放下 colSpan×rowSpan 的空位（添加卡片用）。 */
   private findFreeSlot(colSpan: number, rowSpan: number): ScreensaverGridSlot | undefined {
-    for (let row = 0; row <= SCREEN_SAVER_GRID_ROWS - rowSpan; row++) {
-      for (let col = 0; col <= SCREEN_SAVER_GRID_COLS - colSpan; col++) {
+    const columns = this.gridColumns();
+    const rows = this.gridRows();
+    for (let row = 0; row <= rows - rowSpan; row++) {
+      for (let col = 0; col <= columns - colSpan; col++) {
         let free = true;
         for (const card of this.layout.cards) {
           if (card.floating) {
@@ -1105,18 +1329,130 @@ export class ScreensaverAppModel {
     return card;
   }
 
-  /** 生成默认布局（首次启动/数据损坏时）：时钟 + Git + 相册 三张卡铺满 8 行。 */
+  /**
+   * 生成竖屏默认布局（首次启动/数据损坏时）：时钟 + Git + 相册 三张卡铺满 8 行。
+   * 注意：只重置竖屏；横屏布局由 initializeLandscapeFromPortrait 单独处理。
+   */
   ensureDefaultLayout(): void {
-    this.layout.settings = new ScreensaverSettings();
-    this.layout.cards = [];
+    // 数据损坏时全局外观也回到默认值；两个方向共享新的设置对象。
+    this.sharedSettings = new ScreensaverSettings();
+    this.portraitLayout.settings = this.sharedSettings;
+    this.landscapeLayout.settings = this.sharedSettings;
+    this.setActiveOrientation(ScreenSaverOrientation.Portrait);
+    this.portraitLayout.cards = [];
     const clockCard = this.buildCard('clock', 0, 0, 4, 2);
     clockCard.clock.format = 'timeDate';
     const gitCard = this.buildCard('git', 0, 2, 4, 2);
     const photoCard = this.buildCard('photo', 0, 4, 4, 4);
-    this.layout.cards.push(clockCard);
-    this.layout.cards.push(gitCard);
-    this.layout.cards.push(photoCard);
+    this.portraitLayout.cards.push(clockCard);
+    this.portraitLayout.cards.push(gitCard);
+    this.portraitLayout.cards.push(photoCard);
+    this.portraitLayout.cardsRevision += 1;
     this.save();
+  }
+
+  /**
+   * 横屏首次初始化：把竖屏当前布局复制一份到横屏（全新卡片 id，配置深拷贝）。
+   * 幂等性由 load() 保证：只有横屏独立 key 不存在时才调用，之后即使用户
+   * 在横屏删光卡片也不会再触发，不会重复叠加。
+   *
+   * 横屏 8×4 与竖屏 4×8 格子数相同：
+   * 先把每张卡的跨度按方向旋转缩放（列×2、行÷2），再按「目标跨度 →
+   * 逐级缩小」寻找空位，使快照尽量铺满屏幕；实在放不下的卡片跳过并记日志。
+   */
+  private initializeLandscapeFromPortrait(): void {
+    const columns = SCREEN_SAVER_LANDSCAPE_GRID_COLS;
+    const rows = SCREEN_SAVER_LANDSCAPE_GRID_ROWS;
+    this.landscapeLayout.cards = [];
+    const occupied: boolean[] = [];
+    for (let index = 0; index < columns * rows; index++) {
+      occupied.push(false);
+    }
+    for (const source of this.portraitLayout.cards) {
+      // 把竖屏 4×8 的布局按方向“旋转”到横屏 8×4：
+      // 列跨度 ×2（4→8 列）、行跨度 ÷2（8→4 行），这样快照会铺满整屏，
+      // 而不是沿用竖屏的低矮跨度、只占屏幕上半部分。
+      // 悬浮卡在横屏按普通网格卡处理（横屏没有悬浮的必要）。
+      const scaledCols = Math.max(1, Math.round(source.colSpan * 2));
+      const scaledRows = Math.max(1, Math.round(source.rowSpan / 2));
+      const maxCols = Math.min(scaledCols, SCREEN_SAVER_LANDSCAPE_CARD_MAX_COLS, columns);
+      const maxRows = Math.min(scaledRows, SCREEN_SAVER_LANDSCAPE_CARD_MAX_ROWS, rows);
+      let slot: ScreensaverGridSlot | undefined = undefined;
+      let chosenCols = 0;
+      let chosenRows = 0;
+      // 行优先从大到小，再列从大到小：优先保留高度，其次宽度。
+      for (let spanRows = maxRows; spanRows >= 1 && slot === undefined; spanRows--) {
+        for (let spanCols = maxCols; spanCols >= 1; spanCols--) {
+          if (!screenSaverIsSizeAllowed(source.cardType, spanCols, spanRows)) {
+            continue;
+          }
+          slot = this.findRegionInOccupied(occupied, columns, rows, spanCols, spanRows);
+          if (slot !== undefined) {
+            chosenCols = spanCols;
+            chosenRows = spanRows;
+            break;
+          }
+        }
+      }
+      if (slot === undefined) {
+        ScreenSaverLogger.warn(`landscape snapshot skipped ${source.cardType}: no free region`);
+        continue;
+      }
+      const raw = this.toRawCard(source);
+      raw.id = screenSaverGenerateId('lcard');
+      raw.floating = false;
+      raw.floatLocked = false;
+      raw.colStart = slot.colStart;
+      raw.rowStart = slot.rowStart;
+      raw.colSpan = chosenCols;
+      raw.rowSpan = chosenRows;
+      const clone = this.buildCardFromRaw(raw, columns, rows);
+      if (clone === undefined) {
+        continue;
+      }
+      // buildCardFromRaw 会按 raw 的跨度/位置再吸附一次；这里以选中的空位为准。
+      clone.colStart = slot.colStart;
+      clone.rowStart = slot.rowStart;
+      clone.colSpan = chosenCols;
+      clone.rowSpan = chosenRows;
+      this.markRegion(occupied, columns, slot.colStart, slot.rowStart, chosenCols, chosenRows, true);
+      this.landscapeLayout.cards.push(clone);
+    }
+    // 快照最后做一次“补空”：把卡片能向下/向右扩展的空格吃掉，
+    // 让 8×4 网格尽量铺满屏幕（只改快照，不影响用户手动编辑的布局）。
+    for (const card of this.landscapeLayout.cards) {
+      while (card.rowSpan < SCREEN_SAVER_LANDSCAPE_CARD_MAX_ROWS &&
+        card.rowStart + card.rowSpan < rows) {
+        const nextRows = card.rowSpan + 1;
+        if (!screenSaverIsSizeAllowed(card.cardType, card.colSpan, nextRows)) {
+          break;
+        }
+        if (!this.regionFree(occupied, columns, card.colStart, card.rowStart + card.rowSpan,
+          card.colSpan, 1)) {
+          break;
+        }
+        this.markRegion(occupied, columns, card.colStart, card.rowStart + card.rowSpan,
+          card.colSpan, 1, true);
+        card.rowSpan = nextRows;
+      }
+      while (card.colSpan < SCREEN_SAVER_LANDSCAPE_CARD_MAX_COLS &&
+        card.colStart + card.colSpan < columns) {
+        const nextCols = card.colSpan + 1;
+        if (!screenSaverIsSizeAllowed(card.cardType, nextCols, card.rowSpan)) {
+          break;
+        }
+        if (!this.regionFree(occupied, columns, card.colStart + card.colSpan, card.rowStart,
+          1, card.rowSpan)) {
+          break;
+        }
+        this.markRegion(occupied, columns, card.colStart + card.colSpan, card.rowStart,
+          1, card.rowSpan, true);
+        card.colSpan = nextCols;
+      }
+    }
+    this.landscapeLayout.cardsRevision += 1;
+    ScreenSaverLogger.info(`landscape snapshot: ${this.landscapeLayout.cards.length}/` +
+      `${this.portraitLayout.cards.length} cards`);
   }
 
   /**
@@ -1137,20 +1473,34 @@ export class ScreensaverAppModel {
    * 兼容旧版「多页面」结构：没有 cards 但有 pages 时取第一页。
    */
   private applyLayoutText(text: string): void {
+    if (!this.applyLayoutTextTo(ScreenSaverOrientation.Portrait, text, true)) {
+      this.ensureDefaultLayout();
+    }
+  }
+
+  /**
+   * 解析某种方向的布局文本并写入对应布局。
+   * loadSettings=false 用于横屏：全局外观只以竖屏装载的那份共享对象为准，
+   * 避免横屏文件里的旧外观把用户刚改的设置覆盖回去。
+   * 返回 false 表示文本不可解析（由调用方决定兜底策略）。
+   */
+  private applyLayoutTextTo(mode: ScreenSaverOrientation, text: string, loadSettings: boolean): boolean {
     let raw: ScreensaverRawLayout | undefined = undefined;
     try {
       raw = JSON.parse(text) as ScreensaverRawLayout;
     } catch (parseError) {
       const error = parseError as Error;
-      ScreenSaverLogger.error(`layout parse failed: ${error.message}`);
-      this.ensureDefaultLayout();
-      return;
+      ScreenSaverLogger.error(`${mode} layout parse failed: ${error.message}`);
+      return false;
     }
     if (raw === undefined) {
-      this.ensureDefaultLayout();
-      return;
+      return false;
     }
-    this.applySettings(raw.settings);
+    const previousMode = this.activeOrientation;
+    this.setActiveOrientation(mode);
+    if (loadSettings) {
+      this.applySettings(raw.settings);
+    }
     const legacyPages = raw.pages;
     if (raw.cards === undefined && legacyPages !== undefined && legacyPages.length > 0) {
       ScreenSaverLogger.info('migrating legacy multi-page layout');
@@ -1164,11 +1514,15 @@ export class ScreensaverAppModel {
       ScreenSaverLogger.info('empty layout from storage, no auto default');
     }
     this.layout.schemaVersion = SCREEN_SAVER_SCHEMA_VERSION;
+    // 装载结束回到调用前的方向（load 过程中恒为竖屏）。
+    this.setActiveOrientation(previousMode);
+    return true;
   }
 
   /** Raw 设置 → 严格设置。每个字段都 ?? 默认值，数字字段再夹取范围。 */
   private applySettings(rawSettings: ScreensaverRawSettings | undefined): void {
-    const settings = this.layout.settings;
+    // 背景/文字色/常亮等全局外观：两个方向共用同一个对象。
+    const settings = this.sharedSettings;
     if (rawSettings === undefined) {
       return;
     }
@@ -1209,18 +1563,21 @@ export class ScreensaverAppModel {
    */
   private applyCards(rawCards: ScreensaverRawCard[]): void {
     const accepted: ScreensaverCardInstance[] = [];
+    const columns = this.gridColumns();
+    const rows = this.gridRows();
     for (const rawCard of rawCards) {
-      const card = this.buildCardFromRaw(rawCard);
+      const card = this.buildCardFromRaw(rawCard, columns, rows);
       if (card === undefined) {
         continue;
       }
-      if (!this.canPlaceInList(accepted, card)) {
+      if (!this.canPlaceInList(accepted, card, columns, rows)) {
         ScreenSaverLogger.warn(`drop overlapping card on load: ${card.id}`);
         continue;
       }
       accepted.push(card);
     }
     this.layout.cards = accepted;
+    this.layout.cardsRevision += 1;
   }
 
   /**
@@ -1228,9 +1585,10 @@ export class ScreensaverAppModel {
    * 悬浮卡不占网格单元 → 不参与重叠判定（与 canPlace / findFreeSlot 规则保持一致，
    * 否则「悬浮钟所在格子里正常摆放的卡片」会在下次启动被误判为重叠而丢弃）。
    */
-  private canPlaceInList(cards: ScreensaverCardInstance[], candidate: ScreensaverCardInstance): boolean {
-    if (candidate.colStart + candidate.colSpan > SCREEN_SAVER_GRID_COLS ||
-      candidate.rowStart + candidate.rowSpan > SCREEN_SAVER_GRID_ROWS) {
+  private canPlaceInList(cards: ScreensaverCardInstance[], candidate: ScreensaverCardInstance,
+    columns: number, rows: number): boolean {
+    if (candidate.colStart + candidate.colSpan > columns ||
+      candidate.rowStart + candidate.rowSpan > rows) {
       return false;
     }
     for (const card of cards) {
@@ -1252,7 +1610,8 @@ export class ScreensaverAppModel {
    * 单张 Raw 卡片 → 严格卡片。所有数值都经过夹取、所有枚举都经过白名单
    * 校验——磁盘数据不可信是本方法存在的原因。
    */
-  private buildCardFromRaw(rawCard: ScreensaverRawCard): ScreensaverCardInstance | undefined {
+  private buildCardFromRaw(rawCard: ScreensaverRawCard, columns: number,
+    rows: number): ScreensaverCardInstance | undefined {
     const cardType = this.parseCardType(rawCard.cardType);
     if (cardType === undefined) {
       return undefined;
@@ -1261,14 +1620,14 @@ export class ScreensaverAppModel {
     card.id = (rawCard.id !== undefined && rawCard.id.length > 0) ? rawCard.id : screenSaverGenerateId('card');
     card.cardType = cardType;
     card.enabled = rawCard.enabled ?? true;
-    // 磁盘上的跨度可能来自旧版本（比如 3×1 这类矩阵里没有的尺寸）：
-    // 统一走「吸附到最近合法值」，旧布局自动被纠正且卡片不丢。
+    // 磁盘上的跨度可能来自旧版本或另一个方向（比如竖屏 4×4 放进横屏 5×2）：
+    // 统一走「吸附到当前方向的合法值」，自动纠正且尽量保留卡片。
     const entry = screenSaverSnapCardSize(cardType, rawCard.colSpan ?? 2, rawCard.rowSpan ?? 2,
-      SCREEN_SAVER_GRID_COLS, SCREEN_SAVER_GRID_ROWS);
+      Math.min(SCREEN_SAVER_CARD_MAX_COLS, columns), Math.min(SCREEN_SAVER_CARD_MAX_ROWS, rows));
     card.colSpan = entry.colSpan;
     card.rowSpan = entry.rowSpan;
-    card.colStart = screenSaverClampInt(rawCard.colStart ?? 0, 0, SCREEN_SAVER_GRID_COLS - card.colSpan);
-    card.rowStart = screenSaverClampInt(rawCard.rowStart ?? 0, 0, SCREEN_SAVER_GRID_ROWS - card.rowSpan);
+    card.colStart = screenSaverClampInt(rawCard.colStart ?? 0, 0, columns - card.colSpan);
+    card.rowStart = screenSaverClampInt(rawCard.rowStart ?? 0, 0, rows - card.rowSpan);
     // 浮层字段（需求 B）：旧数据没有这些字段 → 默认 false/0/0/false，即旧行为。
     card.floating = rawCard.floating ?? false;
     card.floatX = Math.max(0, Math.round(rawCard.floatX ?? 0));
@@ -1522,9 +1881,14 @@ export class ScreensaverAppModel {
   // 内存 → 磁盘（序列化）
   // =====================================================================
 
-  /** 严格模型 → Raw 结构（写盘前的转换，字段显式一一对应）。 */
+  /** 严格模型 → Raw 结构（当前方向的布局；写盘前的转换）。 */
   private toRawLayout(): ScreensaverRawLayout {
-    const settings = this.layout.settings;
+    return this.toRawLayoutFor(this.layout, this.activeOrientation);
+  }
+
+  /** 指定方向的布局 → Raw 结构。settings 始终写共享外观对象。 */
+  private toRawLayoutFor(layout: ScreensaverLayout, mode: ScreenSaverOrientation): ScreensaverRawLayout {
+    const settings = this.sharedSettings;
     const rawSettings: ScreensaverRawSettings = {
       defaultIntervalSec: settings.defaultIntervalSec,
       fontFollowSystem: settings.fontFollowSystem,
@@ -1543,16 +1907,29 @@ export class ScreensaverAppModel {
     };
     const rawLayout: ScreensaverRawLayout = {
       schemaVersion: SCREEN_SAVER_SCHEMA_VERSION,
+      orientation: mode,
       settings: rawSettings,
-      cards: this.toRawCards()
+      cards: this.toRawCardsFor(layout)
     };
     return rawLayout;
   }
 
-  /** 卡片列表 → Raw 卡片数组（快照和写盘共用）。 */
+  /** 当前方向的卡片列表 → Raw 数组（编辑快照用）。 */
   private toRawCards(): ScreensaverRawCard[] {
+    return this.toRawCardsFor(this.layout);
+  }
+
+  /** 指定布局的卡片列表 → Raw 数组（写盘 / 横屏快照共用）。 */
+  private toRawCardsFor(layout: ScreensaverLayout): ScreensaverRawCard[] {
     const rawCards: ScreensaverRawCard[] = [];
-    for (const card of this.layout.cards) {
+    for (const card of layout.cards) {
+      rawCards.push(this.toRawCard(card));
+    }
+    return rawCards;
+  }
+
+  /** 单张卡片 → Raw 卡片（字段显式一一对应，配置深拷贝）。 */
+  private toRawCard(card: ScreensaverCardInstance): ScreensaverRawCard {
       const rawClock: ScreensaverRawClock = {
         format: card.clock.format,
         use24Hour: card.clock.use24Hour,
@@ -1648,9 +2025,7 @@ export class ScreensaverAppModel {
         countdown: rawCountdown,
         todo: rawTodo
       };
-      rawCards.push(rawCard);
-    }
-    return rawCards;
+      return rawCard;
   }
 
   /** Git 每日数据 → Raw（缓存序列化用）。 */
@@ -1832,20 +2207,31 @@ export class ScreensaverAppModel {
     return this.store;
   }
 
-  /** 把当前布局序列化并写入偏好存储。put + flush 确保真正落盘；返回成功与否。 */
+  /** 把当前方向布局序列化并写入偏好存储。 */
   private async persistLayout(): Promise<boolean> {
+    return await this.persistLayoutForMode(this.activeOrientation);
+  }
+
+  /**
+   * 按方向写盘：竖屏写老 key（兼容旧版本），横屏写独立 key。
+   * 两个方向的 settings 都是同一份共享外观对象，所以外观改动在任一方向保存都会落盘。
+   */
+  private async persistLayoutForMode(mode: ScreenSaverOrientation): Promise<boolean> {
     const store = await this.ensureStore();
     if (store === undefined) {
       return false;
     }
     try {
-      const text = JSON.stringify(this.toRawLayout());
-      await store.put(SCREEN_SAVER_LAYOUT_KEY, text);
+      const layout = this.layoutForMode(mode);
+      const text = JSON.stringify(this.toRawLayoutFor(layout, mode));
+      const key = mode === ScreenSaverOrientation.Landscape ?
+        SCREEN_SAVER_LANDSCAPE_LAYOUT_KEY : SCREEN_SAVER_LAYOUT_KEY;
+      await store.put(key, text);
       await store.flush();
       return true;
     } catch (err) {
       const error = err as Error;
-      ScreenSaverLogger.error(`layout save failed: ${error.message}`);
+      ScreenSaverLogger.error(`layout save failed (${mode}): ${error.message}`);
       return false;
     }
   }

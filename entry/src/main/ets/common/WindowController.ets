@@ -32,9 +32,24 @@
 import { window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from './Logger';
+import { ScreenSaverOrientation } from '../model/ConfigModels';
 
 // 退出屏保时要恢复显示的系统栏：状态栏 + 导航栏。
 const SCREEN_SAVER_SYSTEM_BARS: Array<'status' | 'navigation'> = ['status', 'navigation'];
+
+/** 屏保内容需要避让的窗口区域（px；调用方换算成 vp 后作为内边距）。 */
+export interface ScreenSaverWindowInsets {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** 零内边距（拿不到窗口时兜底）。 */
+export function screenSaverZeroInsets(): ScreenSaverWindowInsets {
+  const zero: ScreenSaverWindowInsets = { left: 0, top: 0, right: 0, bottom: 0 };
+  return zero;
+}
 
 class ScreenSaverWindowController {
   /** 缓存主窗口实例，避免每次都查询（查询是异步的，有开销）。 */
@@ -43,23 +58,80 @@ class ScreenSaverWindowController {
   /**
    * 进入屏保：接管窗口。
    * @param keepScreenOn 是否保持屏幕常亮（用户开了「常亮」设置才传 true）
+   * @param mode 本次屏保方向（竖屏锁 PORTRAIT，横屏锁 LANDSCAPE）
    */
-  async enter(context: common.Context, keepScreenOn: boolean): Promise<void> {
+  async enter(context: common.Context, keepScreenOn: boolean,
+    mode: ScreenSaverOrientation = ScreenSaverOrientation.Portrait): Promise<void> {
     const target = await this.getWindow(context);
     if (target === undefined) {
       return;
     }
     await this.safeCall((): Promise<void> => target.setWindowLayoutFullScreen(true), 'setWindowLayoutFullScreen(true)');
     await this.safeCall((): Promise<void> => target.setWindowSystemBarEnable([]), 'setWindowSystemBarEnable([])');
-    // 竖屏锁定：屏保的网格布局是按竖屏设计的，横屏会错乱。
-    await this.safeCall((): Promise<void> => target.setPreferredOrientation(window.Orientation.PORTRAIT),
-      'setPreferredOrientation(PORTRAIT)');
+    // 先切方向：主页会在 push 屏保页之前调用 applyOrientation 预检，
+    // 这里再设一次是为了保证「直接进屏保」的路径也一定是正确方向。
+    const orientationOk = await this.applyOrientation(context, mode);
+    if (!orientationOk) {
+      ScreenSaverLogger.warn(`window enter: orientation apply failed (${mode})`);
+    }
     if (keepScreenOn) {
       await this.safeCall((): Promise<void> => target.setWindowKeepScreenOn(true), 'setWindowKeepScreenOn(true)');
     }
     // -1 = 使用系统默认/自动亮度
     await this.safeCall((): Promise<void> => target.setWindowBrightness(-1), 'setWindowBrightness(-1)');
-    ScreenSaverLogger.info(`window enter: immersive portrait, keepScreenOn=${keepScreenOn}`);
+    ScreenSaverLogger.info(`window enter: immersive ${mode}, keepScreenOn=${keepScreenOn}, ` +
+      `orientationOk=${orientationOk}`);
+  }
+
+  /**
+   * 获取横屏/竖屏内容需要避让的安全区（刘海、底部导航条），单位 px。
+   * 只取 CUTOUT 与底部导航指示条：状态栏/导航栏在屏保里已经隐藏，
+   * 若把 TYPE_SYSTEM 也算进来会在隐藏后多出一块空白。
+   */
+  async getContentInsets(context: common.Context): Promise<ScreenSaverWindowInsets> {
+    const zero = screenSaverZeroInsets();
+    const target = await this.getWindow(context);
+    if (target === undefined) {
+      return zero;
+    }
+    try {
+      const cutout = target.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
+      let bottom = 0;
+      try {
+        const navIndicator = target.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+        bottom = Math.max(0, navIndicator.bottomRect.height);
+      } catch (navError) {
+        bottom = 0;
+      }
+      // 横屏时顶部不内缩：卡片需要从屏幕最顶端开始铺满；
+      // 刘海通常落在左右侧，用 left/right 避让即可。
+      const insets: ScreenSaverWindowInsets = {
+        left: Math.max(0, cutout.leftRect.width),
+        top: 0,
+        right: Math.max(0, cutout.rightRect.width),
+        bottom: bottom
+      };
+      return insets;
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`getWindowAvoidArea failed: ${error.message}`);
+      return zero;
+    }
+  }
+
+  /**
+   * 只切换窗口方向（进入屏保前的前置步骤）。
+   * 返回 false 时调用方必须留在首页并提示原因，不能继续 push 屏保页。
+   */
+  async applyOrientation(context: common.Context, mode: ScreenSaverOrientation): Promise<boolean> {
+    const target = await this.getWindow(context);
+    if (target === undefined) {
+      return false;
+    }
+    const orientation = mode === ScreenSaverOrientation.Landscape ?
+      window.Orientation.LANDSCAPE : window.Orientation.PORTRAIT;
+    return await this.safeCall((): Promise<void> => target.setPreferredOrientation(orientation),
+      `setPreferredOrientation(${mode})`);
   }
 
   /** 退出屏保：逐项还原窗口状态（沉浸、常亮、方向、亮度、系统栏）。 */
