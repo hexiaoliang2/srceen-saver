@@ -12,7 +12,6 @@
  *        screenSaverIsSizeAllowed  尺寸是否合法
  *        screenSaverSnapCardSize   非法尺寸吸附到最近的合法值
  *        screenSaverResolveDensity 尺寸 → 内容密度（minimal/compact/full）
- *        screenSaverSizePresets    设置面板的尺寸快捷胶囊
  *
  * 【为什么用数据表而不是 if/else 写死】
  * 卡片库页面、编辑面板、AppModel 的增删改查都基于同一份目录数据工作。
@@ -24,7 +23,7 @@
  * 【尺寸矩阵怎么读（以时钟为例）】
  *   { colSpan: 1, rowSpan: 1, density: 'minimal' }  → 1×1 只排「极简」内容
  *   { colSpan: 4, rowSpan: 2, density: 'full', presetLabel: '4×2' }
- *     → 4×2 排「完整」内容，并且作为设置面板里的「4×2」快捷按钮
+ *     → 4×2 排「完整」内容；设置面板不再暴露尺寸入口，尺寸只在编辑态拖拽调整
  *   { colSpan: 0, rowSpan: 0, density: 'full' }     → 兜底行（相机/视频用）：
  *     区间内其余任意矩形都合法，密度取 full
  *
@@ -40,8 +39,7 @@ import {
   ScreensaverCardMeta,
   ScreensaverCardSizeEntry,
   ScreensaverCardSizeSpec,
-  ScreensaverCardType,
-  ScreensaverSizePreset
+  ScreensaverCardType
 } from '../model/ConfigModels';
 
 /** 兜底行的判定：列与行跨度都为 0。 */
@@ -529,65 +527,4 @@ export function screenSaverResolveDensity(cardType: ScreensaverCardType, colSpan
     return fallback.density;
   }
   return 'full';
-}
-
-/**
- * 需求给定的 13 档「标准尺寸」（变更项 2 通道 A：设置面板可选尺寸集合）。
- * 原文顺序为 4×4,4×3,4×2,4×1,3×4,3×3,3×2,3×1,2×4,2×3,2×2,2×1,1×1；
- * 面板按「从小到大」展示更利于点选，因此这里按列优先升序排列（集合完全一致）。
- * 六类卡片的尺寸矩阵都必须把这 13 档登记为合法尺寸（各自密度按类型定义），
- * 由 CardCatalog 的数据表保证；吸附函数（screenSaverSnapCardSize）据此工作。
- */
-export const SCREEN_SAVER_STANDARD_SIZES: ScreensaverSizePreset[] = [
-  { colSpan: 1, rowSpan: 1, label: '1×1' },
-  { colSpan: 2, rowSpan: 1, label: '2×1' },
-  { colSpan: 3, rowSpan: 1, label: '3×1' },
-  { colSpan: 4, rowSpan: 1, label: '4×1' },
-  { colSpan: 2, rowSpan: 2, label: '2×2' },
-  { colSpan: 3, rowSpan: 2, label: '3×2' },
-  { colSpan: 4, rowSpan: 2, label: '4×2' },
-  { colSpan: 2, rowSpan: 3, label: '2×3' },
-  { colSpan: 3, rowSpan: 3, label: '3×3' },
-  { colSpan: 4, rowSpan: 3, label: '4×3' },
-  { colSpan: 2, rowSpan: 4, label: '2×4' },
-  { colSpan: 3, rowSpan: 4, label: '3×4' },
-  { colSpan: 4, rowSpan: 4, label: '4×4' }
-];
-
-/**
- * 设置面板的「尺寸」快捷胶囊（变更项 2 通道 A）。
- *
- * 组成 = 13 档标准尺寸（按类型过滤为合法） + 矩阵里额外登记的预设
- * （如相册/视频的 1×3、1×4 窄条）。这样：
- *   · 需求列出的 13 档在六类卡片上都可点选；
- *   · 既有的窄条尺寸不会因为列表改版而消失（保持既有能力）。
- */
-export function screenSaverSizePresets(cardType: ScreensaverCardType): ScreensaverSizePreset[] {
-  const spec = screenSaverFindSizeSpec(cardType);
-  const presets: ScreensaverSizePreset[] = [];
-  for (const standard of SCREEN_SAVER_STANDARD_SIZES) {
-    if (screenSaverIsSizeAllowed(cardType, standard.colSpan, standard.rowSpan)) {
-      presets.push(standard);
-    }
-  }
-  if (spec === undefined) {
-    return presets;
-  }
-  for (const entry of spec.entries) {
-    if (screenSaverIsFallbackEntry(entry) || entry.presetLabel.length === 0) {
-      continue;
-    }
-    const already = presets.some((preset: ScreensaverSizePreset): boolean =>
-    preset.colSpan === entry.colSpan && preset.rowSpan === entry.rowSpan);
-    if (already) {
-      continue;
-    }
-    const preset: ScreensaverSizePreset = {
-      colSpan: entry.colSpan,
-      rowSpan: entry.rowSpan,
-      label: entry.presetLabel
-    };
-    presets.push(preset);
-  }
-  return presets;
 }

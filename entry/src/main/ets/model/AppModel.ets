@@ -102,7 +102,6 @@ import {
   ScreensaverRawWeather,
   ScreensaverRawWeatherCache,
   ScreensaverEntryTargetType,
-  ScreensaverResizeResult,
   ScreensaverSettings,
   ScreensaverTodoConfig,
   ScreensaverTodoItem,
@@ -1100,67 +1099,6 @@ export class ScreensaverAppModel {
   }
 
   /**
-   * 缩放的完整结果（变更项 2 的「设置面板通道」反馈用）。
-   * ok=false 表示未能落库（与其它卡片重叠/越界/卡片不存在）；
-   * snapped=true 表示请求的跨度不在尺寸矩阵里、被吸附到了另一个合法值；
-   * unchanged=true 表示最终跨度与操作前一致（点的是当前尺寸，或被吸附回原尺寸）。
-   */
-  resizeCardToDetailed(cardId: string, colSpan: number, rowSpan: number): ScreensaverResizeResult {
-    const card = this.cardById(cardId);
-    if (card === undefined) {
-      const missing: ScreensaverResizeResult = {
-        ok: false,
-        snapped: false,
-        unchanged: true,
-        colSpan: 0,
-        rowSpan: 0
-      };
-      return missing;
-    }
-    // 按当前方向吸附：横屏方向请求 4×3/4×4 会被吸附到 4×2 以内。
-    const entry = screenSaverSnapCardSize(card.cardType, colSpan, rowSpan,
-      this.maxCardColSpan(), this.maxCardRowSpan());
-    const snapped = entry.colSpan !== colSpan || entry.rowSpan !== rowSpan;
-    const unchanged = entry.colSpan === card.colSpan && entry.rowSpan === card.rowSpan;
-    const outcome: ScreensaverResizeResult = {
-      ok: true,
-      snapped: snapped,
-      unchanged: unchanged,
-      colSpan: entry.colSpan,
-      rowSpan: entry.rowSpan
-    };
-    if (unchanged) {
-      return outcome;
-    }
-    if (card.floating) {
-      // 悬浮卡不占网格：只改跨度（决定悬浮卡的显示尺寸），不参与碰撞校验
-      card.colSpan = entry.colSpan;
-      card.rowSpan = entry.rowSpan;
-      this.save();
-      return outcome;
-    }
-    // 靠右/靠下的卡片放大后可能越界：把起点往回拉，保证不超出网格。
-    const nextColStart = Math.max(0, Math.min(card.colStart, this.gridColumns() - entry.colSpan));
-    const nextRowStart = Math.max(0, Math.min(card.rowStart, this.gridRows() - entry.rowSpan));
-    const placed = this.placeCard(cardId, nextColStart, nextRowStart, entry.colSpan, entry.rowSpan);
-    outcome.ok = placed;
-    return outcome;
-  }
-
-  /**
-   * 缩放卡片到指定跨度（布尔版，保留给「只关心成败」的调用方）。
-   *
-   * 与旧实现的关键区别：**非法尺寸会被吸附到最近的合法值**（见尺寸矩阵），
-   * 而不是简单夹取上下限。例如时钟没有 3×3 这一档时，请求 3×3 会吸附到
-   * 4×3（距离最近、面积更大）——保证「矩阵里没有的尺寸永远不会落库」。
-   * 之后再保证不越出网格右下边界（必要时把起点左移/上移），最后尝试放置。
-   */
-  resizeCardTo(cardId: string, colSpan: number, rowSpan: number): boolean {
-    const outcome = this.resizeCardToDetailed(cardId, colSpan, rowSpan);
-    return outcome.ok && !outcome.unchanged;
-  }
-
-  /**
    * 设置/取消「悬浮层」（需求 B）。
    *
    * 与缺陷 1 的关系：悬浮卡与网格卡是同一个 ScreensaverCardInstance，
@@ -1957,7 +1895,8 @@ export class ScreensaverAppModel {
     card.video.uri = rawVideo.uri ?? '';
     card.video.playing = rawVideo.playing ?? false;
     card.video.loop = rawVideo.loop ?? false;
-    card.video.muted = rawVideo.muted ?? true;
+    // 声音不持久化：旧配置里的 muted 一律忽略，每次进入屏保由运行时会话重置。
+    card.video.muted = true;
   }
 
   /** Raw Git 配置 → 严格配置。weeks 必须在档位白名单里，否则回默认 20。 */
@@ -2287,8 +2226,7 @@ export class ScreensaverAppModel {
       const rawVideo: ScreensaverRawVideo = {
         uri: card.video.uri,
         playing: card.video.playing,
-        loop: card.video.loop,
-        muted: card.video.muted
+        loop: card.video.loop
       };
       const rawGit: ScreensaverRawGit = {
         provider: card.git.provider,

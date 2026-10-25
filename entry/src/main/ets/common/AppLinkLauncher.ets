@@ -5,7 +5,8 @@
  *
  * 把「打开入口卡目标」收口成 screenSaverOpenEntry，三种目标类型：
  *   · url：沿用 openLink(link, { appLinkingOnly: false })；
- *   · thirdparty：只能打开预设清单内的 scheme（先 canOpenLink 再 openLink）；
+ *   · thirdparty：只能打开预设清单内的目标；有显式 Ability 时用桌面同款
+ *     Want 恢复上次页面，否则先 canOpenLink 再只调用一次 openLink；
  *   · system：显式 Want（bundleName + abilityName）拉起；失败时若有备用链接
  *     再尝试 openLink。
  *
@@ -98,28 +99,45 @@ async function screenSaverOpenThirdParty(context: common.UIAbilityContext,
     const missing: ScreenSaverLinkResult = { ok: false, reason: '目标应用未安装或不可用：请在设置里重新选择' };
     return missing;
   }
+  // 预设提供了显式 Ability 时，优先“唤起应用本身”而不是深链导航：
+  // 应用已在后台时由系统恢复上次页面，不强制回首页/某个详情页。
+  const preset = screenSaverPresetAppById(entry.presetId);
+  const bundleName = entry.bundleName.trim().length > 0 ? entry.bundleName.trim() :
+    (preset === undefined ? '' : preset.bundleName);
+  const abilityName = entry.abilityName.trim().length > 0 ? entry.abilityName.trim() :
+    (preset === undefined ? '' : preset.abilityName);
+  if (bundleName.length > 0 && abilityName.length > 0) {
+    // 与桌面图标启动保持一致：home action + home entity 会复用已有任务，
+    // 应用在后台时恢复上次页面（如 B 站视频页），而不是重新导航到首页。
+    const want: Want = {
+      bundleName: bundleName,
+      abilityName: abilityName,
+      action: 'ohos.want.action.home',
+      entities: ['entity.system.home']
+    };
+    try {
+      await context.startAbility(want);
+      ScreenSaverLogger.info(`entry third-party resumed: ${bundleName}/${abilityName}`);
+      const ok: ScreenSaverLinkResult = { ok: true, reason: '' };
+      return ok;
+    } catch (err) {
+      const error = err as BusinessError;
+      ScreenSaverLogger.warn(`entry third-party resume failed: ${bundleName}/${abilityName} code=${error.code}`);
+      const failed: ScreenSaverLinkResult = { ok: false, reason: '目标应用拉起失败：请在设置里重新选择' };
+      return failed;
+    }
+  }
   try {
     await context.openLink(scheme, { appLinkingOnly: false });
     ScreenSaverLogger.info(`entry third-party opened: scheme=${scheme}`);
     const ok: ScreenSaverLinkResult = { ok: true, reason: '' };
     return ok;
-  } catch (openError) {
-    const openBusinessError = openError as BusinessError;
-    ScreenSaverLogger.warn(
-      `entry third-party openLink failed: scheme=${scheme} code=${openBusinessError.code}`);
-    // 部分机型/应用只响应隐式 Want（action=viewData + uri），openLink 失败后再试一次。
-    const want: Want = { action: 'ohos.want.action.viewData', uri: scheme };
-    try {
-      await context.startAbility(want);
-      ScreenSaverLogger.info(`entry third-party opened by want: scheme=${scheme}`);
-      const ok: ScreenSaverLinkResult = { ok: true, reason: '' };
-      return ok;
-    } catch (err) {
-      const error = err as BusinessError;
-      ScreenSaverLogger.warn(`entry third-party failed: scheme=${scheme} code=${error.code}`);
-      const failed: ScreenSaverLinkResult = { ok: false, reason: '目标应用拉起失败：请在设置里重新选择' };
-      return failed;
-    }
+  } catch (err) {
+    const error = err as BusinessError;
+    ScreenSaverLogger.warn(`entry third-party failed: scheme=${scheme} code=${error.code}`);
+    // 只发起一次 openLink：不再追加隐式 Want 兜底，避免应用已被拉起后又跳第二次。
+    const failed: ScreenSaverLinkResult = { ok: false, reason: '目标应用拉起失败：请在设置里重新选择' };
+    return failed;
   }
 }
 

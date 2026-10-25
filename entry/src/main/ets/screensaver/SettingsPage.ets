@@ -20,7 +20,6 @@
  */
 
 import { common } from '@kit.AbilityKit';
-import { fileIo } from '@kit.CoreFileKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { SCREEN_SAVER_COLORS } from '../common/ScreenSaverStyle';
 import { ScreenSaverChip, ScreenSaverToggleRow } from '../common/SheetParts';
@@ -70,11 +69,6 @@ const TEXT_TONE_OPTIONS: ScreensaverStringOption[] = [
 
 /** 固定锁屏主题索引顺序（与 ScreensaverGalleryTheme 一致）。 */
 const GALLERY_THEME_INDICES: number[] = [0, 1, 2, 3];
-
-/** 内置示例背景图的文件名（对应 resources/rawfile/sample_photos/ 下的自生成素材）。 */
-const CANVAS_SAMPLE_FILE: string = 'photo_landscape_4k.jpg';
-/** 内置示例背景图（暗色）：用于验证「较暗图片背景」下的自动文字色判定。 */
-const CANVAS_SAMPLE_DARK_FILE: string = 'photo_dark.jpg';
 
 @ComponentV2
 export struct ScreenSaverSettingsPage {
@@ -188,61 +182,6 @@ export struct ScreenSaverSettingsPage {
     screenSaverAppModel.save();
     screenSaverCanvasBackground.clear();
     this.toast('已移除背景图片');
-  }
-
-  /**
-   * 使用内置示例图作为背景（自测用，与视频/相册面板的「示例素材」同一套做法）：
-   * 工程内自生成素材（rawfile），复制到应用沙箱后写入背景配置，
-   * 并立刻做一次离屏模糊（若开关打开）以便验证缓存复用。
-   */
-  private async useSampleCanvasImage(): Promise<void> {
-    await this.copySampleCanvasImage(CANVAS_SAMPLE_FILE);
-  }
-
-  /** 使用内置「暗色」示例图作为背景（验证较暗图片背景下的自动判定用）。 */
-  private async useDarkSampleCanvasImage(): Promise<void> {
-    await this.copySampleCanvasImage(CANVAS_SAMPLE_DARK_FILE);
-  }
-
-  /** 复制内置示例图到沙箱并设为背景（亮/暗两张共用同一条链路）。 */
-  private async copySampleCanvasImage(fileName: string): Promise<void> {
-    const context = this.context();
-    if (context === undefined) {
-      return;
-    }
-    try {
-      const sampleDir = `${context.filesDir}/canvas_backgrounds`;
-      try {
-        fileIo.mkdirSync(sampleDir);
-      } catch (mkdirError) {
-        ScreenSaverLogger.info('canvas sample dir already ready');
-      }
-      const targetPath = `${sampleDir}/${fileName}`;
-      let exists = false;
-      try {
-        exists = fileIo.accessSync(targetPath);
-      } catch (accessError) {
-        exists = false;
-      }
-      if (!exists) {
-        const content = await context.resourceManager.getRawFileContent(`sample_photos/${fileName}`);
-        const file = fileIo.openSync(targetPath, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
-        try {
-          fileIo.writeSync(file.fd, content.buffer as ArrayBuffer);
-        } finally {
-          fileIo.closeSync(file);
-        }
-      }
-      const settings = screenSaverAppModel.layout.settings;
-      settings.canvasImageUri = `file://${targetPath}`;
-      screenSaverAppModel.save();
-      await screenSaverCanvasBackground.ensure(settings.canvasImageUri, settings.canvasBlur);
-      this.toast('已使用示例背景图（模糊按当前开关）');
-    } catch (err) {
-      const error = err as Error;
-      ScreenSaverLogger.warn(`canvas sample image failed: ${error.message}`);
-      this.toast('示例背景图不可用');
-    }
   }
 
   /** 背景图片显示名（取 uri 最后一段，过长截断）。 */
@@ -522,20 +461,6 @@ export struct ScreenSaverSettingsPage {
                 .onClick((): void => {
                   void this.pickCanvasImage();
                 })
-              Text('示例图')
-                .fontSize(13)
-                .fontColor(SCREEN_SAVER_COLORS.accent)
-                .margin({ left: 10 })
-                .onClick((): void => {
-                  void this.useSampleCanvasImage();
-                })
-              Text('暗示例')
-                .fontSize(13)
-                .fontColor(SCREEN_SAVER_COLORS.accent)
-                .margin({ left: 10 })
-                .onClick((): void => {
-                  void this.useDarkSampleCanvasImage();
-                })
               if (screenSaverAppModel.layout.settings.canvasImageUri.length > 0) {
                 Text('移除')
                   .fontSize(13)
@@ -561,15 +486,6 @@ export struct ScreenSaverSettingsPage {
                 }
               }
             })
-
-            Text('说明：系统壁纸接口（@ohos.wallpaper）自 API 9 起为系统 API，' +
-              '三方应用无法读取桌面壁纸、也无法对桌面做模糊（需要系统级权限 GET_WALLPAPER），' +
-              '因此这里提供「自选本地图片 + 一次性离屏模糊缓存」作为替代：不是实时桌面模糊，' +
-              '换桌面壁纸后需要重新选图。⚠ 浅色背景会显著增加屏幕耗电（OLED 上等效点亮更多像素），' +
-              '与「极低功耗」目标冲突，默认纯黑最省电。')
-              .fontSize(11)
-              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-              .width('100%')
           }
           .width('100%')
           .padding(14)
@@ -620,15 +536,6 @@ export struct ScreenSaverSettingsPage {
                 screenSaverAppModel.save();
               }
             })
-
-            Text('判定说明：整体背景为纯色时用其色值算 WCAG 相对亮度；背景为图片/模糊图时' +
-              '取整图主色（≈主要区域平均色）算亮度，取样在背景图就绪时执行一次并缓存。' +
-              '自动档阈值取黑白文字的对比度交叉点（相对亮度 0.179），保证纯色背景下 ' +
-              '所选文字色对比度 ≥ 4.5:1（WCAG AA 正文下限）；图片背景局部像素不可预知，' +
-              '因此启用轻投影兜底。装饰素材（天气图标等）随档位切换深浅两套。')
-              .fontSize(11)
-              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-              .width('100%')
           }
           .width('100%')
           .padding(14)
@@ -642,10 +549,6 @@ export struct ScreenSaverSettingsPage {
                 Text('固定锁屏主题')
                   .fontSize(14)
                   .fontColor('#CCCCCC')
-                Text('仅点击互动 · 无滑动')
-                  .fontSize(11)
-                  .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-                  .margin({ top: 2 })
               }
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
@@ -671,12 +574,6 @@ export struct ScreenSaverSettingsPage {
               }, (index: number): string => `gallery_theme_${index}`)
             }
             .width('100%')
-
-            Text('固定锁屏只支持点击：时间、天气、背景；植物温室额外支持叶片。' +
-              '所有反馈为一次性 300/400ms，静止态无循环动画。')
-              .fontSize(11)
-              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-              .width('100%')
           }
           .width('100%')
           .padding(14)

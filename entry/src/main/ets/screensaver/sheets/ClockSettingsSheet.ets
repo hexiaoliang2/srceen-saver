@@ -5,7 +5,7 @@
  *
  * 【这个文件是干什么的】
  * 时钟卡片的设置抽屉：实时预览 + 格式（时间+日期/纯时间/纯日期/农历）、
- * 12/24 小时制、显示秒、字号档位、尺寸预设、删除卡片。
+ * 12/24 小时制、显示秒、字号档位、删除卡片。
  *
  * 【小尺寸怎么处理（缺陷 3 之后的新规则）】
  * 尺寸矩阵（CardCatalog 的 CLOCK_SIZE_SPEC）给每个跨度定义了内容密度：
@@ -29,21 +29,18 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverSizePresetRow,
   ScreenSaverToggleRow,
-  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
-import { screenSaverResolveDensity, screenSaverSizePresets } from '../../cards/CardCatalog';
+import { screenSaverResolveDensity } from '../../cards/CardCatalog';
 import { ScreensaverClockCard } from '../../cards/ClockCardView';
 import {
   ClockFormat,
   ScreensaverCardDensity,
   ScreensaverCardInstance,
   ScreensaverNumberOption,
-  ScreensaverSizePreset
 } from '../../model/ConfigModels';
 
 interface ClockFormatOption {
@@ -106,18 +103,6 @@ export struct ScreenSaverClockSettingsPanel {
   private setFormat(format: ClockFormat): void {
     this.card.clock.format = format;
     this.applyChange();
-  }
-
-  /**
-   * 应用尺寸预设（变更项 2 通道 A）：走 AppModel.resizeCardToDetailed，
-   * 失败（重叠/越界）与「被吸附」都给明确反馈（非法尺寸必须吸附到最近合法值）。
-   */
-  private applySizePreset(preset: ScreensaverSizePreset): void {
-    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
-    const message = screenSaverResizeFeedbackText(outcome);
-    if (message.length > 0) {
-      this.toast(message);
-    }
   }
 
   /** 弹 toast 提示。 */
@@ -277,17 +262,6 @@ export struct ScreenSaverClockSettingsPanel {
               }
             })
           }
-
-          // ---------- 尺寸预设 ----------
-          // 预设列表来自尺寸矩阵（CardCatalog），选中态比对当前跨格数。
-          ScreenSaverSizePresetRow({
-            presets: screenSaverSizePresets('clock'),
-            currentCols: this.card.colSpan,
-            currentRows: this.card.rowSpan,
-            onPick: (preset: ScreensaverSizePreset): void => {
-              this.applySizePreset(preset);
-            }
-          })
 
           // ---------- 删除卡片 ----------
           ScreenSaverDeleteCardRow({

@@ -20,16 +20,12 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverSizePresetRow,
-  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
-import { screenSaverOpenEntry } from '../../common/AppLinkLauncher';
 import { screenSaverImportEntryIcon, screenSaverRemoveEntryIcon } from '../../common/EntryIconStore';
 import { screenSaverAppModel } from '../../model/AppModel';
 import { ScreensaverEntryCard } from '../../cards/EntryCardView';
-import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import {
   screenSaverPresetApps,
   screenSaverPresetAppById,
@@ -40,7 +36,6 @@ import {
   SCREEN_SAVER_ENTRY_DATA_VERSION,
   ScreensaverCardInstance,
   ScreensaverEntryTargetType,
-  ScreensaverSizePreset
 } from '../../model/ConfigModels';
 
 @ComponentV2
@@ -57,7 +52,6 @@ export struct ScreenSaverEntrySettingsPanel {
   @Local nameDraft: string = '';
   @Local linkDraft: string = '';
   @Local subtitleDraft: string = '';
-  @Local statusText: string = '';
   @Local iconStatusText: string = '';
   @Local iconBusy: boolean = false;
   /** 选图看门狗：系统选择器异常不返回时，30s 后恢复按钮可点，避免卡在「处理中」。 */
@@ -138,7 +132,6 @@ export struct ScreenSaverEntrySettingsPanel {
     this.nameDraft = this.card.entry.displayName;
     this.linkDraft = this.card.entry.link;
     this.subtitleDraft = this.card.entry.subtitle;
-    this.statusText = '';
     screenSaverAppModel.save();
   }
 
@@ -158,7 +151,6 @@ export struct ScreenSaverEntrySettingsPanel {
     this.typeDraft = app.kind;
     this.nameDraft = app.name;
     this.subtitleDraft = app.subtitle;
-    this.statusText = '';
     screenSaverAppModel.save();
     ScreenSaverLogger.info(`entry preset selected: ${app.id}`);
   }
@@ -169,36 +161,6 @@ export struct ScreenSaverEntrySettingsPanel {
       return true;
     }
     return index < this.thirdPartyAvailable.length ? this.thirdPartyAvailable[index] : false;
-  }
-
-  /**
-   * 测试打开：与「屏保态单击卡片」共用同一个 AppLinkLauncher 实现。
-   * 拉起失败时把预设目标写成失效态（持久化），方便卡片提示重选。
-   */
-  private async testOpen(): Promise<void> {
-    this.applyDrafts();
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-    if (context === undefined) {
-      this.statusText = '无法获取应用上下文';
-      return;
-    }
-    const result = await screenSaverOpenEntry(context, this.card.entry);
-    if (result.ok) {
-      this.card.entry.invalid = false;
-      this.card.entry.lastFailureAt = 0;
-      this.card.entry.failureCount = 0;
-      screenSaverAppModel.save();
-      this.statusText = '已发起跳转';
-      return;
-    }
-    if (this.card.entry.targetType !== 'url' && this.card.entry.presetId.length > 0) {
-      this.card.entry.invalid = true;
-      this.card.entry.lastFailureAt = Date.now();
-      this.card.entry.failureCount = Math.min(this.card.entry.failureCount + 1, 9999);
-      screenSaverAppModel.save();
-    }
-    this.statusText = result.reason;
-    this.toast(result.reason);
   }
 
   /**
@@ -261,18 +223,6 @@ export struct ScreenSaverEntrySettingsPanel {
     screenSaverRemoveEntryIcon(previous);
     this.iconStatusText = '已恢复默认图标';
     this.toast(this.iconStatusText);
-  }
-
-  /**
-   * 应用尺寸预设（变更项 2 通道 A：设置面板可改尺寸）。
-   * 与编辑态拖拽缩放写的是同一份布局数据（card.colSpan/rowSpan）。
-   */
-  private applySizePreset(preset: ScreensaverSizePreset): void {
-    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
-    const message = screenSaverResizeFeedbackText(outcome);
-    if (message.length > 0) {
-      this.toast(message);
-    }
   }
 
   @Builder
@@ -393,8 +343,7 @@ export struct ScreenSaverEntrySettingsPanel {
     if (this.card.entry.presetId.length === 0) {
       return '请从下方清单里选择一个目标应用。';
     }
-    return this.typeDraft === 'thirdparty' ?
-      '第三方应用只能从清单选择，不能手输包名或 scheme。' :
+    return this.typeDraft === 'thirdparty' ? '' :
       '系统应用用显式 Want 拉起；失败时会尝试下方备用链接。';
   }
 
@@ -436,11 +385,13 @@ export struct ScreenSaverEntrySettingsPanel {
               this.typeChip('系统应用', 'system')
             }
             .width('100%')
-            Text(this.selectionHint())
-              .fontSize(10)
-              .fontColor(this.card.entry.invalid ? SCREEN_SAVER_COLORS.danger :
-              SCREEN_SAVER_COLORS.textTertiary)
-              .width('100%')
+            if (this.selectionHint().length > 0) {
+              Text(this.selectionHint())
+                .fontSize(10)
+                .fontColor(this.card.entry.invalid ? SCREEN_SAVER_COLORS.danger :
+                SCREEN_SAVER_COLORS.textTertiary)
+                .width('100%')
+            }
           }
           .width('100%')
 
@@ -576,43 +527,6 @@ export struct ScreenSaverEntrySettingsPanel {
               .width('100%')
           }
           .width('100%')
-
-          // ---------- 测试打开 ----------
-          Row({ space: 8 }) {
-            ScreenSaverChip({
-              label: '测试打开',
-              onTap: (): void => {
-                void this.testOpen();
-              }
-            })
-            if (this.statusText.length > 0) {
-              Text(this.statusText)
-                .fontSize(11)
-                .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .layoutWeight(1)
-            }
-          }
-          .width('100%')
-
-          // ---------- 合规说明 ----------
-          Text('目标只从预设清单选择，不支持手输包名/scheme。第三方可用性只判断清单内 scheme ' +
-            '能否被处理（canOpenLink），不读取已安装应用列表，不上传任何数据。系统应用不做预检测，' +
-            '拉起失败会保留配置并标记为失效，方便重新选择。')
-            .fontSize(11)
-            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-            .width('100%')
-
-          // ---------- 尺寸（变更项 2 通道 A） ----------
-          ScreenSaverSizePresetRow({
-            presets: screenSaverSizePresets('entry'),
-            currentCols: this.card.colSpan,
-            currentRows: this.card.rowSpan,
-            onPick: (preset: ScreensaverSizePreset): void => {
-              this.applySizePreset(preset);
-            }
-          })
 
           ScreenSaverDeleteCardRow({
             onDelete: (): void => {

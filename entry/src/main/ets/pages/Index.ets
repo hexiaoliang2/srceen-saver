@@ -178,18 +178,11 @@ struct ScreenSaverConsole {
     Scroll() {
       Column({ space: 14 }) {
         // ---------- 标题区 ----------
-        Column({ space: 4 }) {
-          Text('屏保')
-            .fontSize(20)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(SCREEN_SAVER_COLORS.textPrimary)
-            .width('100%')
-          Text('应用内全屏展示 · 竖屏 / 横屏独立布局')
-            .fontSize(12)
-            .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-            .width('100%')
-        }
-        .width('100%')
+        Text('屏保')
+          .fontSize(20)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(SCREEN_SAVER_COLORS.textPrimary)
+          .width('100%')
 
         // ---------- 一键开启（两个方向）：预览在各自按钮上方 ----------
         Column({ space: 8 }) {

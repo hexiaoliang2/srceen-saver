@@ -1,7 +1,7 @@
 # 应用入口卡 v2 交付说明（url / 第三方 / 系统应用 + 图标）
 
-> 构建：`devecocli build` → **BUILD SUCCESSFUL**（产物 `entry-default-signed.hap`，2026-10-25 17:24，含时钟/天气/第三方 scheme 修复 + 旧失效标记清理）
-> 安装：真机 `5MT0226127042321` 安装最新包 → **installed / start / Smoke PASS**；模拟器证据基于 17:15 包（最终包仅新增旧失效标记清理，模拟器 hdc 数据传输卡住，未完成最终包重装）
+> 构建：`devecocli build` → **BUILD SUCCESSFUL**（产物 `entry-default-signed.hap`，2026-10-25 20:53，含时钟/天气/第三方 scheme 修复 + B 站恢复上次页面）
+> 安装：真机 `5MT0226127042321` 安装最新包 → **installed / start / Smoke PASS**；模拟器证据基于 19:15 包（本次仅改 B 站 scheme 与第三方兜底，未重装模拟器）
 > 环境：HUAWEI Mate 80 Pro Max 真机（1320×2848 px）；Mate 80 Pro Max 模拟器（HarmonyOS 7.0.0 / API 26，1320×2848 px、密度 3.25）
 > 截图目录：`.verify/entry/`（下文文件名均相对该目录）
 > 范围：只改入口卡、入口设置面板、跳转封装与图标存储；未新增权限、未改其他卡片、未重构卡片注册/网格布局。
@@ -56,9 +56,30 @@
 2. `querySchemes` 同步改为 `alipays`、`amihexin`；
 3. 读取已存卡片时**无条件用当前预设刷新 scheme / bundleName / abilityName**，保证升级后旧卡片自动获得修正值（显示名称、副标题、图标、备用链接保留）；
 4. 若发现旧启动参数被纠正且类型未变，同步清除旧 `invalid/lastFailureAt/failureCount`，避免升级后卡片仍显示「应用不可用」；用户再次拉起失败会重新进入失效态；
-5. 第三方拉起保留 `openLink`，失败时新增隐式 Want（`ohos.want.action.viewData` + `uri`）回退，兼容只响应隐式跳转的应用。
+5. 第三方若预设提供显式 Ability，则用「桌面图标同款 Want」唤起应用本身，恢复上次页面；其余预设只调用一次 `openLink`，不再追加隐式 Want 兜底。
 
 真机复验（见 §6.1）：时钟、天气、bilibili、支付宝均成功拉起；bilibili/支付宝首次会弹系统「打开应用」确认框，属 Deep Linking 正常行为。
+
+### 0.7 B 站跳转修复：直达上次页面，不强制首页/详情页
+
+真机反馈「进入 B 站后又跳一次」，随后明确要求：用户之前在视频页，就应直接回到该视频页。复核结论：
+
+- 旧 scheme `bilibili://browser`：B 站先打开内部 browser 页（`about://blank?night=1`），再跳首页，视觉上是二次跳转；
+- 改为 `bilibili://root`：不再有中间页，但会**强制回 B 站首页**，不满足「恢复上次页面」；
+- 普通显式 `startAbility({bundleName, abilityName})`：B 站把它当成新启动，仍回首页；
+- 带 `action='ohos.want.action.home'` + `entities=['entity.system.home']` 的显式 Want：与点击桌面图标一致，复用已有任务，真机实测恢复上次视频页。
+
+最终实现：
+
+1. B 站预设增加 `bundleName='yylx.danmaku.bili'`、`abilityName='EntryAbility'`；
+2. 第三方若有显式 Ability，用桌面同款 Want 唤起应用本身，不传深链 URI、不指定页面；
+3. 没有显式 Ability 的第三方仍只调用一次 `openLink`；删除二次隐式 Want 兜底；
+4. 旧卡片读取时按 presetId 自动刷新 scheme/bundleName/abilityName，无需重选。
+
+真机复验：
+
+- B 站停留在《黑神话：悟空》视频页 → 返回屏保点入口卡 → 再次回到同一视频页（`65-real-bilibili-resume-video.png`）；
+- 无 `about:blank` 中间页、无二次跳转；窗口列表仅一个 `bili0`。
 
 ---
 
@@ -67,9 +88,9 @@
 | 文件 | 改了什么 |
 |---|---|
 | `entry/src/main/ets/model/ConfigModels.ets` | 入口 v2 字段：`version / targetType / presetId / scheme / bundleName / abilityName / invalid / lastFailureAt / failureCount`；常量 `SCREEN_SAVER_ENTRY_DATA_VERSION=2`、`SCREEN_SAVER_ENTRY_ICON_MAX_BYTES=2MB`、`SCREEN_SAVER_ENTRY_ICON_MAX_PX=384`、`ScreensaverEntryTargetType`；Raw 结构同步扩展 |
-| `entry/src/main/ets/model/EntryPresets.ets`（新增） | 11 个预设：第三方 6（哔哩哔哩 `bilibili://browser`、京东 `openApp.jdMobile://`、淘宝 `taobao://`、微信 `weixin://`、支付宝 `alipays://`、同花顺 `amihexin://`）+ 系统 5（日历、图库、时钟 `com.huawei.hmos.clock.phone`、天气 `com.huawei.hmsapp.totemweather.MainAbility`、备忘录）；`screenSaverPresetApps`、`screenSaverPresetAppById`、`screenSaverPresetAppSelectable`（系统恒可选，第三方走 `canOpenLink`） |
+| `entry/src/main/ets/model/EntryPresets.ets`（新增） | 11 个预设：第三方 6（哔哩哔哩 `bilibili://root` + `yylx.danmaku.bili/EntryAbility`、京东 `openApp.jdMobile://`、淘宝 `taobao://`、微信 `weixin://`、支付宝 `alipays://`、同花顺 `amihexin://`）+ 系统 5（日历、图库、时钟 `com.huawei.hmos.clock.phone`、天气 `com.huawei.hmsapp.totemweather.MainAbility`、备忘录）；`screenSaverPresetApps`、`screenSaverPresetAppById`、`screenSaverPresetAppSelectable`（系统恒可选，第三方走 `canOpenLink`） |
 | `entry/src/main/ets/model/AppModel.ets` | v1→v2 迁移（无 `targetType` → `url`，链接原样保留）；目标类型消毒；预设 id 校验/回填（找不到或类型不符 → `invalid=true`）；url 分支清理预设字段；Raw 全字段序列化；删卡时同步删除图标文件；卡片标题失效/未选择分支 |
-| `entry/src/main/ets/common/AppLinkLauncher.ets` | 新增统一入口 `screenSaverOpenEntry(context, entry)`：`url` 走原 `openLink`；`thirdparty` 先 `canOpenLink` 再 `openLink`，失败回退隐式 `Want`（`ohos.want.action.viewData` + uri）；`system` 用显式 `Want`（bundleName + abilityName），失败时有备用链接才回退 `openLink` |
+| `entry/src/main/ets/common/AppLinkLauncher.ets` | 新增统一入口 `screenSaverOpenEntry(context, entry)`：`url` 走原 `openLink`；`thirdparty` 先 `canOpenLink`，有显式 Ability 时用桌面同款 Want 恢复上次页面，否则只调用一次 `openLink`；`system` 用显式 `Want`（bundleName + abilityName），失败时有备用链接才回退 `openLink` |
 | `entry/src/main/ets/common/EntryIconStore.ets` | 系统 PhotoViewPicker（免权限）；≤2MB；JPG/PNG/WebP；中心方形裁剪；384×384 PNG；文件名 `entry_icon_<safeKey>_<timestamp>.png`（避免同名解码缓存）；替换删旧、恢复默认删文件；可读性检查与失败兜底 |
 | `entry/src/main/ets/common/CardTheme.ets` | 新增 `entryInvalid` 提示色 token（浅色 `#F2C14E` / 深色 `#B26A00`） |
 | `entry/src/main/ets/cards/EntryCardView.ets` | 四态文案：正常 url / 预设应用 / 未选择应用 / 失效；失效时副标题走提示色；1×1 失效副标题截短为「应用不可用」保证完整可读；自定义图标不可读/解码失败回退「名称首字」中性图标 |
@@ -133,7 +154,7 @@ ScreensaverEntryConfig {
 | 类型 | 实现 | 失败处理 |
 |---|---|---|
 | `url` | `context.openLink(link, { appLinkingOnly: false })`（原逻辑不变） | 提示「无法打开：目标应用未安装或链接不可用」；不改失效态 |
-| `thirdparty` | 取 `entry.scheme`（缺失按 presetId 回填）→ `canOpenLink` → `openLink`；失败再回退隐式 Want（action=viewData + uri） | unavailable/异常 → 返回原因；屏保态/测试打开都会持久化失效态 |
+| `thirdparty` | 取 `entry.scheme`（缺失按 presetId 回填）→ `canOpenLink` → 有显式 Ability 时用 `{bundleName, abilityName, action: home, entities: [system.home]}` 恢复任务；否则只调用一次 `openLink` | unavailable/异常 → 返回原因；屏保态/测试打开都会持久化失效态 |
 | `system` | `startAbility({ bundleName, abilityName })`（缺失按 presetId 回填） | 有备用链接 → 先回退 `openLink`；否则返回「无法打开该系统应用：可能未安装或版本不支持」并持久化失效态 |
 
 统一入口 `screenSaverOpenEntry` 同时服务三条点击路径：屏保态整卡、设置面板「测试打开」、设置面板选择后的测试。
@@ -178,7 +199,8 @@ ScreensaverEntryConfig {
 | 系统列表 → 时钟 → 测试打开（修复后） | 启动成功；日志 ability=`com.huawei.hmos.clock.phone` | `57`、日志 |
 | 系统列表 → 天气 → 测试打开（修复后） | 启动成功；日志 ability=`com.huawei.hmsapp.totemweather.MainAbility` | `58`、日志 |
 | 第三方列表（修复后） | bilibili/京东/淘宝/微信/支付宝/同花顺均不再误报未安装（真机已装项可选） | 布局 dump |
-| 哔哩哔哩 → 测试打开（修复后） | `openLink` 成功（`bilibili://browser`）→ 系统确认框 → 打开成功 | `59`、`60`、日志 |
+| 哔哩哔哩 → 恢复上次页面（真机） | 停留在《黑神话：悟空》视频页 → 点入口卡 → 回到同一视频页；无 `about:blank`、无二次跳转 | `65`、窗口列表、日志 |
+| 哔哩哔哩单次拉起 | 窗口列表仅一个 `bili0`；显式 Want 复用已有任务 | `65`、窗口列表 |
 | 支付宝 → 测试打开（修复后） | `openLink` 成功（`alipays://`）→ 系统确认框 → 打开成功 | `61`、`62`、日志 |
 | 17:24 最终包重装 | 微信入口与自定义图标保留；第三方列表 bilibili/支付宝/同花顺仍可选，无误报未安装 | `63`、布局 dump |
 | 图标 >2MB（2,479,929 字节） | 拒绝，提示「图片超过 2MB，请换一张」，原图标保留 | `47`、日志 |
@@ -199,7 +221,7 @@ entry icon import failed: code=undefined message=undefined
 entry icon imported: /data/storage/el2/base/haps/entry/files/entry_icons/entry_icon_card_mvf8wfwy_cjsx_1792918908679.png
 entry system app opened: com.huawei.hmos.clock/com.huawei.hmos.clock.phone
 entry system app opened: com.huawei.hmsapp.totemweather/com.huawei.hmsapp.totemweather.MainAbility
-entry third-party opened: scheme=bilibili://browser
+entry third-party resumed: yylx.danmaku.bili/EntryAbility
 entry third-party opened: scheme=alipays://
 ```
 

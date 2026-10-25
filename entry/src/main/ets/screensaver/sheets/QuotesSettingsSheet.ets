@@ -2,21 +2,17 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverSizePresetRow,
   ScreenSaverToggleRow,
-  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
 import { ScreensaverQuotesCard } from '../../cards/QuotesCardView';
-import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import {
   SCREEN_SAVER_QUOTES_MAX_SYMBOLS,
   screenSaverQuotesChartEligible,
   ScreensaverCardInstance,
   ScreensaverQuoteSymbol,
-  ScreensaverSizePreset
 } from '../../model/ConfigModels';
 import {
   screenSaverNormalizeStoredQuote,
@@ -187,14 +183,6 @@ export struct ScreenSaverQuotesSettingsPanel {
       }
     }
     this.onDone();
-  }
-
-  private applySizePreset(preset: ScreensaverSizePreset): void {
-    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
-    const message = screenSaverResizeFeedbackText(outcome);
-    if (message.length > 0) {
-      this.toast(message);
-    }
   }
 
   private cacheTimeText(): string {
@@ -410,16 +398,6 @@ export struct ScreenSaverQuotesSettingsPanel {
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .width('100%')
-
-          ScreenSaverSizePresetRow({
-            presets: screenSaverSizePresets('quotes'),
-            currentCols: this.card.colSpan,
-            currentRows: this.card.rowSpan,
-            onPick: (preset: ScreensaverSizePreset): void => {
-              this.applySizePreset(preset);
-            }
-          })
-
           ScreenSaverDeleteCardRow({
             onDelete: (): void => {
               this.onDelete();

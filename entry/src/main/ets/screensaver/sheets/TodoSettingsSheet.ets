@@ -2,15 +2,12 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverSizePresetRow,
-  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
 import { ScreensaverTodoCard } from '../../cards/TodoCardView';
-import { screenSaverSizePresets } from '../../cards/CardCatalog';
-import { ScreensaverCardInstance, ScreensaverSizePreset, ScreensaverTodoItem } from '../../model/ConfigModels';
+import { ScreensaverCardInstance, ScreensaverTodoItem } from '../../model/ConfigModels';
 import {
   screenSaverTodoAdd,
   screenSaverTodoClearDone,
@@ -80,14 +77,6 @@ export struct ScreenSaverTodoSettingsPanel {
     screenSaverTodoClearDone(this.card.todo);
     screenSaverAppModel.save();
     this.statusText = '已清除完成项';
-  }
-
-  private applySizePreset(preset: ScreensaverSizePreset): void {
-    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
-    const message = screenSaverResizeFeedbackText(outcome);
-    if (message.length > 0) {
-      this.toast(message);
-    }
   }
 
   private countText(): string {
@@ -247,16 +236,6 @@ export struct ScreenSaverTodoSettingsPanel {
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .width('100%')
-
-          ScreenSaverSizePresetRow({
-            presets: screenSaverSizePresets('todo'),
-            currentCols: this.card.colSpan,
-            currentRows: this.card.rowSpan,
-            onPick: (preset: ScreensaverSizePreset): void => {
-              this.applySizePreset(preset);
-            }
-          })
-
           ScreenSaverDeleteCardRow({
             onDelete: (): void => {
               this.onDelete();

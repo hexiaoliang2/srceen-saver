@@ -2,19 +2,15 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverSizePresetRow,
   ScreenSaverToggleRow,
-  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel, screenSaverGenerateId } from '../../model/AppModel';
 import { ScreensaverCountdownCard } from '../../cards/CountdownCardView';
-import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import {
   ScreensaverCardInstance,
   ScreensaverCustomCountdown,
-  ScreensaverSizePreset
 } from '../../model/ConfigModels';
 import {
   screenSaverDateFromKey,
@@ -191,14 +187,6 @@ export struct ScreenSaverCountdownSettingsPanel {
       return;
     }
     this.statusText = '已删除';
-  }
-
-  private applySizePreset(preset: ScreensaverSizePreset): void {
-    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
-    const message = screenSaverResizeFeedbackText(outcome);
-    if (message.length > 0) {
-      this.toast(message);
-    }
   }
 
   private dataReadTime(): string {
@@ -469,16 +457,6 @@ export struct ScreenSaverCountdownSettingsPanel {
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .width('100%')
-
-          ScreenSaverSizePresetRow({
-            presets: screenSaverSizePresets('countdown'),
-            currentCols: this.card.colSpan,
-            currentRows: this.card.rowSpan,
-            onPick: (preset: ScreensaverSizePreset): void => {
-              this.applySizePreset(preset);
-            }
-          })
-
           ScreenSaverDeleteCardRow({
             onDelete: (): void => {
               this.onDelete();

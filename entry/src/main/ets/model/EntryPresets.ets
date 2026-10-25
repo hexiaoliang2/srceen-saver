@@ -40,9 +40,10 @@ const THIRD_PARTY_PRESETS: ScreensaverPresetApp[] = [
     kind: 'thirdparty',
     name: '哔哩哔哩',
     subtitle: '第三方应用',
-    scheme: 'bilibili://browser',
-    bundleName: '',
-    abilityName: ''
+    scheme: 'bilibili://root',
+    // 显式唤起主 Ability：不导航到固定页面，由 B 站恢复上次停留页面。
+    bundleName: 'yylx.danmaku.bili',
+    abilityName: 'EntryAbility'
   },
   {
     id: 'jd',

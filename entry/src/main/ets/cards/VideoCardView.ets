@@ -3,30 +3,30 @@
  * 视频卡片视图（VideoCardView.ets）
  * =============================================================================
  *
- * 【这个文件是干什么的】
- * 视频卡片：默认只显示「封面帧」（视频第 0 秒画面的小图，零解码成本），
- * 用户开了「播放视频」才真正启动 Video 组件解码播放。
+ * 本地视频卡：画面 + 播放/暂停、进度、声音三控件。
+ *   · 控件默认隐藏（2s 无操作自动隐藏），点击画面唤起；控件为半透明浮层，
+ *     不改变视频画面尺寸；
+ *   · 1 列窄条（1×1/1×2/1×3/1×4）只显示居中的播放/暂停；
+ *   · 2×1/3×1/4×1 与 2×2 及以上显示三控件；
+ *   · 播放/暂停状态来自 Video 回调（onStart/onPause/onFinish/onError）；
+ *   · 进度来自 onPrepared/onUpdate（约 1 次/秒），拖动时用本地预览值；
+ *   · 声音状态由 VideoSoundSession 运行时管理，不持久化；每次重置回到静音。
  *
- * 【为什么默认不播放，而是显示封面帧】
- * 视频解码是本应用最耗电的操作（CPU+GPU 持续工作），屏保又往往整夜挂机。
- * 设计取舍：
- *   - 默认封面帧：静态图，几乎不耗电，视觉上依然是「视频卡片」；
- *   - 需要播放时手动打开（设置里也有全局默认值），并在面板里明确提示耗电。
- *
- * 【封面帧的显示原理】
- * VideoThumb 服务把视频首帧生成成 jpg 缓存文件，这里把缓存路径作为
- * Video 组件的 previewUri 传入——就算不播放，Video 组件也先显示这张预览图。
- *
- * 【异常兜底】
- * - 没选视频 → 「未选择视频」占位；
- * - 视频文件被删/权限失效 → 「视频不可用」占位 + 编辑态「重选」按钮；
- * - 播放结束且未开循环 → 自动把 playing 置回 false（回到封面帧态）。
+ * 控件常显规则已被用户明确覆盖为“点击画面唤起、2s 自动消失”，
+ * 但控件层仍为 overlay，不改变画面尺寸、不引起布局抖动。
  * =============================================================================
  */
 
 import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import { screenSaverVideoThumb } from '../common/VideoThumb';
+import {
+  screenSaverVideoAudioProbe,
+  ScreenSaverVideoAudioTrackState
+} from '../common/VideoAudioProbe';
+import { screenSaverSystemAudioState } from '../common/SystemAudioState';
+import { screenSaverVideoSoundSession } from '../common/VideoSoundSession';
 import { SCREEN_SAVER_METRICS } from '../common/ScreenSaverStyle';
 import { screenSaverContainSize, screenSaverFittedSize, ScreenSaverFitSize } from '../common/ContentFit';
 import {
@@ -36,8 +36,11 @@ import {
 } from '../common/CardTheme';
 import { SCREEN_SAVER_FONT } from '../common/CardTypography';
 import { screenSaverResolveDensity } from './CardCatalog';
+import { screenSaverAppModel } from '../model/AppModel';
 import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode,
   ScreensaverInkTone } from '../model/ConfigModels';
+
+type ScreenSaverVideoPlaybackPhase = 'idle' | 'playing' | 'paused' | 'finished' | 'error';
 
 @ComponentV2
 export struct ScreensaverVideoCard {
@@ -45,90 +48,108 @@ export struct ScreensaverVideoCard {
   @Param cardMode: ScreensaverCardMode = 'play';
   /** 屏保在前台时为 true：后台时立即停止播放（省电流控）。 */
   @Param cardActive: boolean = true;
-  /**
-   * 文字/图标墨色档与投影兜底开关（变更项 3.2/3.3）。
-   * 由屏保页统一解析后下发（同一来源）；默认浅色（设置面板等深色容器里直接用默认）。
-   */
+  /** 文字/图标墨色档与投影兜底开关（由屏保页统一解析后下发）。 */
   @Param cardTone: ScreensaverInkTone = 'light';
   @Param cardHalo: boolean = false;
-  /**
-   * 是否处于「设置面板置预览」：预览也需要能验证视频本身（变更项 3）。
-   * 为 true 时允许在 cardMode==='edit' 下播放，入口就是面板里的「播放视频」开关。
-   */
+  /** 设置面板预览：允许在 cardMode==='edit' 下播放，但控件不显示。 */
   @Param previewActive: boolean = false;
   /** 请求打开配置面板（「重选」按钮冒泡给父组件）。 */
   @Event onRequestConfig: () => void = (): void => {};
 
-  /**
-   * 当前尺寸对应的内容密度档（尺寸矩阵查表得到）。
-   * 直接读 card 的跨度而不是父组件透传的 @Param：@Trace 字段变化会立即
-   * 触发本视图重算，不受 ForEach 复用/@Builder 按值传参的影响。
-   */
   private density(): ScreensaverCardDensity {
     return screenSaverResolveDensity(this.card.cardType, this.card.colSpan, this.card.rowSpan);
   }
 
   // ---------- 渲染状态 ----------
-  @Local coverPath: string = '';        // 封面帧缓存文件路径
-  @Local unavailable: boolean = false;  // 视频不可用（被删/无权限）
-  @Local emptyVisible: boolean = true;  // 是否显示「未选择视频」占位
-  @Local prepared: boolean = false;     // Video 组件是否已就绪（onPrepared 回调）
-  /**
-   * 视频原始宽高比（宽/高，0 = 未知）。
-   * 变更项 2（视频统一处理）：画面放进「紧贴内容」的圆角容器，
-   * 未铺满时内容四角为圆角、铺满时与卡片圆角一致（同一数值）。
-   */
+  @Local coverPath: string = '';
+  @Local unavailable: boolean = false;
+  @Local emptyVisible: boolean = true;
+  @Local prepared: boolean = false;
   @Local videoRatio: number = 0;
-  /** 卡片实际宽高（vp），内容容器尺寸换算用（onAreaChange 更新）。 */
   @Local cardW: number = 0;
   @Local cardH: number = 0;
+  @Local audioTrackState: ScreenSaverVideoAudioTrackState = 'unknown';
 
-  /** Video 组件的控制器：start/pause/stop 都通过它操作。 */
+  // ---------- 播放/进度状态（真实回调驱动） ----------
+  @Local playbackPhase: ScreenSaverVideoPlaybackPhase = 'idle';
+  @Local playbackError: string = '';
+  @Local durationSec: number = 0;
+  @Local currentSec: number = 0;
+  /** 拖动中的预览值；拖动时 Slider 只显示它，不跟随 onUpdate。 */
+  @Local seekDragging: boolean = false;
+  @Local seekPreviewSec: number = 0;
+
+  // ---------- 控件显隐（用户覆盖为 2s 自动隐藏） ----------
+  @Local controlsVisible: boolean = false;
+  private hideTimer: number = -1;
+  /** 拖动 seek 的失败回退看门狗（一次性定时器，不是常驻循环）。 */
+  private seekTimer: number = -1;
+  private pendingSeekSec: number = -1;
+  private seekPreviousSec: number = 0;
+
+  // 控件触摸位移判定：>10vp 视为滑动，不执行点击。
+  private controlDownX: number = 0;
+  private controlDownY: number = 0;
+  private controlMoved: boolean = false;
+
   private controller: VideoController = new VideoController();
 
-  /** 组件挂载：检查视频源可用性并生成封面帧。 */
   aboutToAppear(): void {
+    // 卡片重建/实例重新挂载：集中重置所有视频卡声音。
+    screenSaverVideoSoundSession.reset('card-appear');
     void this.prepareSource();
   }
 
-  /** 组件销毁：停止播放（离开屏保页面时最关键的省电动作）。 */
   aboutToDisappear(): void {
+    this.clearHideTimer();
+    this.clearSeekTimer();
     this.pausePlayback();
+    screenSaverVideoSoundSession.reset('card-disappear');
   }
 
-  /** 换了视频：先停旧播放，重新生成封面帧（新视频不继承「播放」开关）。 */
+  /** 换视频：停止旧播放、清空运行态，并重置声音会话。 */
   @Monitor('card.video.uri')
   onUriChanged(): void {
+    this.clearHideTimer();
+    this.clearSeekTimer();
     this.pausePlayback();
     this.card.video.playing = false;
     this.prepared = false;
+    this.playbackPhase = 'idle';
+    this.playbackError = '';
+    this.durationSec = 0;
+    this.currentSec = 0;
+    this.seekDragging = false;
+    this.seekPreviewSec = 0;
+    this.audioTrackState = 'unknown';
+    this.controlsVisible = false;
+    screenSaverVideoSoundSession.reset('uri-change');
     void this.prepareSource();
   }
 
-  /** 播放开关变化：同步播放/暂停。 */
   @Monitor('card.video.playing')
   onPlayingChanged(): void {
     this.syncPlayback();
   }
 
-  /** 退后台/进编辑态立即暂停；回到屏保播放态按原设置恢复播放。 */
   @Monitor('cardActive')
   onActiveChanged(): void {
     if (this.cardActive) {
       this.syncPlayback();
     } else {
       this.pausePlayback();
+      this.controlsVisible = false;
+      this.clearHideTimer();
+      screenSaverVideoSoundSession.reset('card-inactive');
     }
   }
 
-  /**
-   * 准备视频源：
-   *   - 空 uri → 显示「未选择视频」；
-   *   - 探测不可读 → 显示「视频不可用」；
-   *   - 可读 → 读取视频真实宽高（计算内容容器比例）并生成（或命中缓存的）首帧封面图。
-   * 封面缓存仍以「目标尺寸」入文件名：变更项 2 之后按视频等比尺寸生成
-   * （不再固定 640×360），避免竖屏视频封面被拉伸后与容器比例不符。
-   */
+  @Monitor('controlsVisible')
+  onControlsVisibleChanged(): void {
+    ScreenSaverLogger.info(`video controls visible=${this.controlsVisible} card=${this.card.id}`);
+  }
+
+  /** 源准备：可用性、音轨、尺寸、封面。 */
   private async prepareSource(): Promise<void> {
     const uri = this.card.video.uri;
     if (uri.length === 0) {
@@ -136,6 +157,7 @@ export struct ScreensaverVideoCard {
       this.unavailable = false;
       this.coverPath = '';
       this.videoRatio = 0;
+      this.audioTrackState = 'unknown';
       return;
     }
     const readable = screenSaverVideoThumb.probeReadable(uri);
@@ -144,14 +166,27 @@ export struct ScreensaverVideoCard {
     if (!readable) {
       this.coverPath = '';
       this.videoRatio = 0;
+      this.audioTrackState = 'unknown';
       return;
     }
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined) {
       return;
     }
-    // 视频真实尺寸（元数据读取一次并缓存；失败时 videoRatio=0 → Contain 兜底）。
+    const trackState = await screenSaverVideoAudioProbe.probe(uri);
+    if (this.card.video.uri !== uri) {
+      return;
+    }
+    this.audioTrackState = trackState;
+    if (trackState !== 'present') {
+      screenSaverVideoSoundSession.disable(this.card.id);
+    }
+    ScreenSaverLogger.info(`video card audio track: ${trackState} uri=${uri}`);
+
     const videoSize = await screenSaverVideoThumb.probeVideoSize(uri);
+    if (this.card.video.uri !== uri) {
+      return;
+    }
     let coverWidth = 640;
     let coverHeight = 360;
     if (videoSize !== undefined && videoSize.width > 0 && videoSize.height > 0) {
@@ -163,23 +198,19 @@ export struct ScreensaverVideoCard {
       this.videoRatio = 0;
     }
     const cover = await screenSaverVideoThumb.firstFrameFile(context, uri, coverWidth, coverHeight);
-    this.coverPath = cover;
+    if (this.card.video.uri === uri) {
+      this.coverPath = cover;
+    }
   }
 
-  /** 当前墨色档的调色板（文字颜色与兜底投影色都从这里取，同一来源）。 */
   private palette(): ScreensaverCardPalette {
     return screenSaverCardPalette(this.cardTone);
   }
 
-  /** 文字投影参数（halo 关闭时 radius=0 = 不画，不引入条件分支）。 */
   private textShadow(): ShadowOptions {
     return screenSaverTextShadow(this.cardHalo, this.palette().halo);
   }
 
-  /**
-   * 内容容器尺寸（vp）：按视频真实比例等比放进卡片，未铺满时留出透明区域。
-   * 比例未知（探测失败/未选视频）时返回整卡尺寸（等价旧的 Contain 兜底渲染）。
-   */
   private contentWidth(): number {
     const width = this.cardW > 0 ? this.cardW : 320;
     const height = this.cardH > 0 ? this.cardH : 480;
@@ -192,18 +223,54 @@ export struct ScreensaverVideoCard {
     return screenSaverContainSize(width, height, this.videoRatio).height;
   }
 
-  /**
-   * 播放同步（变更项 3 后的触发条件）：
-   *   playing 开关打开 且（屏保展示态且在前台 或 处于设置面板预览）且 播放器已就绪。
-   * 任何条件不满足一律 pause（宁可保守，不可偷跑解码）。
-   *
-   * 注意：这里**不依赖卡片上的按钮**——屏保态的播放入口是「单击卡片」
-   * （由 ScreensaverPage.handlePlayModeCardTap 统一分发，改 playing 开关），
-   * 编辑态/面板预览的入口是设置面板里的「播放视频」开关。
-   */
+  /** 单列窄条：只保留播放/暂停（用户确认的尺寸规则）。 */
+  private compactControls(): boolean {
+    return this.card.colSpan === 1;
+  }
+
+  private soundEnabled(): boolean {
+    return screenSaverVideoSoundSession.isActive(this.card.id);
+  }
+
+  private soundAvailable(): boolean {
+    return this.audioTrackState === 'present';
+  }
+
+  private soundHint(): string {
+    if (this.audioTrackState === 'absent') {
+      return '该视频无音轨';
+    }
+    if (this.audioTrackState === 'unsupported') {
+      return '该视频音轨编码不受支持（如 AC3/DTS）';
+    }
+    if (this.audioTrackState === 'unknown') {
+      return '音轨检测失败，暂不可开启声音';
+    }
+    return '';
+  }
+
+  private soundShortLabel(): string {
+    if (this.audioTrackState === 'absent') {
+      return '无音轨';
+    }
+    if (this.audioTrackState === 'unsupported') {
+      return '音轨不支持';
+    }
+    if (this.audioTrackState === 'unknown') {
+      return '检测失败';
+    }
+    return '';
+  }
+
+  /** 播放/暂停状态只由 Video 回调更新；未就绪时按 not playing 处理。 */
+  private isActuallyPlaying(): boolean {
+    return this.playbackPhase === 'playing';
+  }
+
   private syncPlayback(): void {
     const contextActive = (this.cardMode === 'play' && this.cardActive) || this.previewActive;
-    if (this.card.video.playing && contextActive && this.prepared) {
+    if (this.card.video.playing && contextActive && this.prepared &&
+      this.playbackPhase !== 'error') {
       ScreenSaverLogger.info(`video start uri=${this.card.video.uri} preview=${this.previewActive}`);
       this.controller.start();
     } else {
@@ -211,14 +278,6 @@ export struct ScreensaverVideoCard {
     }
   }
 
-  /**
-   * 暂停播放（缺陷 4 修正点）。
-   *
-   * 只暂停，**不把 card.video.playing 写回 false**：离开屏保、切后台、组件销毁
-   * 这些都是「临时状态」，用户打开的「播放视频」偏好应当保留，回到屏保后
-   * 按原设置继续播。旧实现在这里顺手把 playing 置 false 并落盘，等于用户
-   * 每次退出屏保就被静默改了一次配置。
-   */
   private pausePlayback(): void {
     try {
       this.controller.pause();
@@ -227,17 +286,274 @@ export struct ScreensaverVideoCard {
     }
   }
 
-  /** 弹 toast 提示（播放态点「重选」时提示先去编辑模式）。 */
+  private togglePlayback(): void {
+    if (this.card.video.uri.length === 0 || this.unavailable || this.playbackPhase === 'error') {
+      return;
+    }
+    this.showControls();
+    if (this.isActuallyPlaying() || this.card.video.playing) {
+      this.card.video.playing = false;
+      this.pausePlayback();
+      screenSaverAppModel.save();
+      return;
+    }
+    if (this.playbackPhase === 'finished') {
+      this.currentSec = 0;
+      this.seekPreviewSec = 0;
+      try {
+        this.controller.setCurrentTime(0, SeekMode.Accurate);
+      } catch (err) {
+        ScreenSaverLogger.warn('video restart seek failed');
+      }
+    }
+    this.card.video.playing = true;
+    screenSaverAppModel.save();
+    if (this.prepared) {
+      this.syncPlayback();
+    }
+  }
+
+  private toggleSound(): void {
+    this.showControls();
+    if (!this.soundAvailable()) {
+      const hint = this.soundHint();
+      if (hint.length > 0) {
+        this.toast(hint);
+      }
+      return;
+    }
+    if (this.soundEnabled()) {
+      screenSaverVideoSoundSession.disable(this.card.id);
+      return;
+    }
+    const systemState = screenSaverSystemAudioState.read();
+    screenSaverVideoSoundSession.request(this.card.id);
+    if (systemState.known && (systemState.muted || systemState.volume <= 0)) {
+      this.toast('系统媒体音量为 0 或已静音，请在系统设置中调整');
+    }
+  }
+
+  private showControls(): void {
+    if (this.cardMode !== 'play' || this.card.video.uri.length === 0 || this.unavailable) {
+      ScreenSaverLogger.info(`video controls blocked: mode=${this.cardMode} ` +
+        `uri=${this.card.video.uri.length} unavailable=${this.unavailable} card=${this.card.id}`);
+      return;
+    }
+    ScreenSaverLogger.info(`video controls show: card=${this.card.id}`);
+    this.controlsVisible = true;
+    this.scheduleHide();
+  }
+
+  private scheduleHide(): void {
+    this.clearHideTimer();
+    this.hideTimer = setTimeout((): void => {
+      this.hideTimer = -1;
+      if (this.seekDragging) {
+        this.scheduleHide();
+        return;
+      }
+      this.controlsVisible = false;
+    }, 2000);
+  }
+
+  private clearHideTimer(): void {
+    if (this.hideTimer >= 0) {
+      clearTimeout(this.hideTimer);
+      this.hideTimer = -1;
+    }
+  }
+
+  private clearSeekTimer(): void {
+    if (this.seekTimer >= 0) {
+      clearTimeout(this.seekTimer);
+      this.seekTimer = -1;
+    }
+    this.pendingSeekSec = -1;
+  }
+
+  private trackControlTouch(event: TouchEvent): void {
+    if (event.type === TouchType.Down) {
+      this.controlMoved = false;
+      if (event.touches.length > 0) {
+        this.controlDownX = event.touches[0].x;
+        this.controlDownY = event.touches[0].y;
+      }
+      return;
+    }
+    if (event.type === TouchType.Move && event.touches.length > 0) {
+      const dx = event.touches[0].x - this.controlDownX;
+      const dy = event.touches[0].y - this.controlDownY;
+      if (Math.sqrt(dx * dx + dy * dy) > 10) {
+        this.controlMoved = true;
+      }
+    }
+  }
+
+  private controlClick(action: () => void): void {
+    if (this.controlMoved) {
+      this.controlMoved = false;
+      return;
+    }
+    action();
+  }
+
+  private durationValid(): boolean {
+    return Number.isFinite(this.durationSec) && this.durationSec > 0.05;
+  }
+
+  private sliderMax(): number {
+    return this.durationValid() ? this.durationSec : 1;
+  }
+
+  private sliderValue(): number {
+    const value = this.seekDragging ? this.seekPreviewSec : this.currentSec;
+    if (!Number.isFinite(value) || value < 0) {
+      return 0;
+    }
+    return Math.min(value, this.sliderMax());
+  }
+
+  private formatClock(seconds: number): string {
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return '--:--';
+    }
+    const total = Math.floor(seconds);
+    const minutes = Math.floor(total / 60);
+    const remain = total % 60;
+    const mm = minutes < 10 ? `0${minutes}` : `${minutes}`;
+    const ss = remain < 10 ? `0${remain}` : `${remain}`;
+    return `${mm}:${ss}`;
+  }
+
+  private timeText(): string {
+    if (!this.durationValid()) {
+      return '--:-- / --:--';
+    }
+    const total = Math.ceil(this.durationSec);
+    const shown = this.seekDragging ? this.seekPreviewSec : this.currentSec;
+    const current = Math.min(Math.floor(shown), total);
+    return `${this.formatClock(current)} / ${this.formatClock(total)}`;
+  }
+
+  private onSeekChange(value: number, mode: SliderChangeMode): void {
+    if (!this.durationValid()) {
+      return;
+    }
+    this.showControls();
+    const clamped = Math.max(0, Math.min(value, this.durationSec));
+    if (mode === SliderChangeMode.Begin || mode === SliderChangeMode.Moving) {
+      this.seekDragging = true;
+      this.seekPreviewSec = clamped;
+      return;
+    }
+    if (mode === SliderChangeMode.Click) {
+      this.seekDragging = true;
+      this.seekPreviewSec = clamped;
+    }
+    this.commitSeek(clamped);
+  }
+
+  private commitSeek(target: number): void {
+    if (this.pendingSeekSec >= 0 && Math.abs(target - this.pendingSeekSec) < 0.05) {
+      return;
+    }
+    this.clearSeekTimer();
+    const previous = this.currentSec;
+    this.seekPreviousSec = previous;
+    this.seekDragging = false;
+    this.seekPreviewSec = target;
+    // VideoController 没有 seek Promise，本机也不回调 onSeeking/onSeeked；
+    // 这里乐观显示目标位置，若播放器报 onError 再回退（见 onError）。
+    this.currentSec = target;
+    if (Math.abs(target - previous) < 0.2) {
+      return;
+    }
+    this.pendingSeekSec = target;
+    ScreenSaverLogger.info(`video seek request: target=${target} previous=${previous}`);
+    try {
+      this.controller.setCurrentTime(target, SeekMode.Accurate);
+    } catch (err) {
+      this.revertSeek('进度跳转失败，已回到原位置');
+      return;
+    }
+    // 仅用于清理 pending 标记；不因缺少回调而误判失败。
+    this.seekTimer = setTimeout((): void => {
+      this.seekTimer = -1;
+      this.pendingSeekSec = -1;
+    }, 1500);
+  }
+
+  private revertSeek(message: string): void {
+    ScreenSaverLogger.warn(`video seek revert: ${message}`);
+    this.pendingSeekSec = -1;
+    this.seekDragging = false;
+    this.seekPreviewSec = this.seekPreviousSec;
+    this.currentSec = this.seekPreviousSec;
+    this.clearSeekTimer();
+    this.toast(message);
+  }
+
+  private handlePrepared(duration: number): void {
+    if (Number.isFinite(duration) && duration > 0) {
+      this.durationSec = duration;
+    } else {
+      this.durationSec = 0;
+    }
+    this.currentSec = Math.min(this.currentSec, this.durationValid() ? this.durationSec : 0);
+    this.prepared = true;
+    if (this.playbackPhase === 'idle') {
+      this.playbackPhase = 'paused';
+    }
+    this.syncPlayback();
+  }
+
+  private handleUpdate(time: number): void {
+    if (!Number.isFinite(time) || time < 0) {
+      return;
+    }
+    if (this.seekDragging) {
+      return;
+    }
+    // seek 已发出但播放器还没跳到目标时，忽略旧的进度回调，避免 UI 回跳。
+    if (this.pendingSeekSec >= 0) {
+      if (Math.abs(time - this.pendingSeekSec) < 1.5) {
+        this.pendingSeekSec = -1;
+        if (this.seekTimer >= 0) {
+          clearTimeout(this.seekTimer);
+          this.seekTimer = -1;
+        }
+        const max = this.durationValid() ? this.durationSec : time;
+        this.currentSec = Math.min(time, max);
+      }
+      return;
+    }
+    const max = this.durationValid() ? this.durationSec : time;
+    this.currentSec = Math.min(time, max);
+  }
+
+  private handleSeeked(time: number): void {
+    ScreenSaverLogger.info(`video seeked: time=${time}`);
+    if (this.seekTimer >= 0) {
+      clearTimeout(this.seekTimer);
+      this.seekTimer = -1;
+    }
+    this.pendingSeekSec = -1;
+    if (Number.isFinite(time) && time >= 0) {
+      this.currentSec = Math.min(time, this.durationValid() ? this.durationSec : time);
+      this.seekPreviewSec = this.currentSec;
+    }
+    this.seekDragging = false;
+  }
+
   private toast(message: string): void {
     try {
-      this.getUIContext().getPromptAction().showToast({ message: message, duration: 1500 });
+      this.getUIContext().getPromptAction().showToast({ message: message, duration: 1800 });
     } catch (err) {
       const error = err as Error;
       ScreenSaverLogger.warn(`toast failed: ${error.message}`);
     }
   }
 
-  /** 「重选」按钮：编辑态冒泡打开配置面板，播放态提示去编辑模式。 */
   private handleReselect(): void {
     if (this.cardMode === 'edit') {
       this.onRequestConfig();
@@ -246,11 +562,6 @@ export struct ScreensaverVideoCard {
     }
   }
 
-  /**
-   * 封面帧的 URI 形式。
-   * Video 组件的 src / previewUri 都走 URI 解析：沙箱文件必须带 file:// 前缀，
-   * 只给纯路径会被当成「找不到的 base path」从而显示黑屏。
-   */
   private coverUri(): string {
     if (this.coverPath.length === 0) {
       return '';
@@ -261,81 +572,258 @@ export struct ScreensaverVideoCard {
     return `file://${this.coverPath}`;
   }
 
-  /**
-   * 界面结构（Stack 分层）——变更项 1~3 之后不再有任何常驻控件层：
-   *   1. 视频画面（有视频且可用时）放进「内容容器」：
-   *      · 容器尺寸 = 按视频真实比例等比放进卡片（变更项 2）；
-   *      · 容器圆角 = 卡片圆角（SCREEN_SAVER_METRICS.cardRadius，10vp），
-   *        未铺满时圆角落在画面四角上，铺满时与卡片圆角一致（两次确认后的方案）；
-   *      · **不播放**时用 Image 显示封面帧（objectFit=Contain，letterbox 透明）；
-   *      · **播放**时挂载 Video 组件（objectFit=Contain，容器已贴合视频比例，
-   *        播放器内部不再出现 letterbox 黑边）。
-   *   2. 「未选择视频」占位（极简档压成一行小字，避免 1×1 里文字溢出）；
-   *   3. 「视频不可用」占位（含编辑态「重选」按钮，仅完整档显示按钮）。
-   *
-   * 已移除：卡片正中的播放/停止按钮与半透明遮罩层（原「▶/❚❚」角标）。
-   * 播放入口改为：屏保展示态单击卡片（ScreensaverPage 统一分发）；
-   * 编辑态/面板预览用设置面板里的「播放视频」开关。
-   *
-   * 文字颜色随墨色档切换（变更项 3.2），复杂背景/对比度不足时带轻投影兜底。
-   */
+  @Builder
+  playButton(size: number) {
+    Button({ type: ButtonType.Circle, stateEffect: true }) {
+      SymbolGlyph(this.isActuallyPlaying() ? $r('sys.symbol.pause_fill') : $r('sys.symbol.play_fill'))
+        .fontSize(size)
+        .fontColor(['#F2F2F2'])
+    }
+    .width(44)
+    .height(44)
+    .padding(0)
+    .backgroundColor('#66000000')
+    .onTouch((event: TouchEvent): void => {
+      this.trackControlTouch(event);
+    })
+    .onClick((): void => {
+      this.controlClick((): void => {
+        this.togglePlayback();
+      });
+    })
+  }
+
+  @Builder
+  soundButton() {
+    Button({ type: ButtonType.Circle, stateEffect: true }) {
+      Column({ space: 1 }) {
+        SymbolGlyph(this.soundEnabled() ? $r('sys.symbol.speaker_wave_2_fill') :
+          $r('sys.symbol.speaker_slash_fill'))
+          .fontSize(20)
+          .fontColor([this.soundAvailable() ? '#F2F2F2' : '#80F2F2F2'])
+        if (!this.soundAvailable()) {
+          Text(this.soundShortLabel())
+            .fontSize(7)
+            .fontColor('#CCF2F2F2')
+            .maxLines(1)
+        }
+      }
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+    }
+    .width(44)
+    .height(44)
+    .padding(0)
+    .backgroundColor('#66000000')
+    .opacity(this.soundAvailable() ? 1 : 0.55)
+    .onTouch((event: TouchEvent): void => {
+      this.trackControlTouch(event);
+    })
+    .onClick((): void => {
+      this.controlClick((): void => {
+        this.toggleSound();
+      });
+    })
+  }
+
+  @Builder
+  compactOverlay() {
+    Stack({ alignContent: Alignment.Center }) {
+      this.playButton(24)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  fullOverlay() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      Row({ space: 3 }) {
+        this.playButton(21)
+        // 时间与进度条同一行：2×2 也能稳定显示当前/总时长。
+        Text(this.timeText())
+          .fontSize(8)
+          .fontColor('#D9F2F2F2')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Clip })
+          .width(68)
+        Slider({
+          value: this.sliderValue(),
+          min: 0,
+          max: this.sliderMax(),
+          step: this.durationValid() && this.durationSec < 10 ? 0.1 : 1
+        })
+          .layoutWeight(1)
+          .height(44)
+          .trackThickness(2)
+          .blockSize({ width: 10, height: 10 })
+          .selectedColor('#F2F2F2')
+          .trackColor('#66FFFFFF')
+          .enabled(this.durationValid())
+          .onChange((value: number, mode: SliderChangeMode): void => {
+            this.onSeekChange(value, mode);
+          })
+        this.soundButton()
+      }
+      .width('100%')
+      // 44vp 控件热区 + 26vp 底部安全留白：避开系统底部手势区。
+      .height(70)
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 6, right: 6, bottom: 26 })
+      .backgroundColor('#66000000')
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   build() {
     Stack() {
       if (this.card.video.uri.length > 0 && !this.unavailable) {
         Stack() {
-          if (!this.card.video.playing && this.coverUri().length > 0) {
-            // 静态态：封面帧用 Image 显示（letterbox 透明）
-            Image(this.coverUri())
-              .objectFit(ImageFit.Contain)
-              .width('100%')
-              .height('100%')
-          } else {
-            Video({
-              src: this.card.video.uri,
-              // previewUri：播放器就绪前的预览图（封面帧缓存，需 file:// 前缀）
-              previewUri: this.coverUri().length > 0 ? this.coverUri() : undefined,
-              controller: this.controller
+          Video({
+            src: this.card.video.uri,
+            previewUri: this.coverUri().length > 0 ? this.coverUri() : undefined,
+            controller: this.controller
+          })
+            .autoPlay(false)
+            .controls(false)
+            .loop(this.card.video.loop)
+            .muted(!this.soundEnabled())
+            .objectFit(ImageFit.Contain)
+            .width('100%')
+            .height('100%')
+            .backgroundColor(Color.Transparent)
+            .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
+            .clip(true)
+            // 原生 Video surface 会优先消费触摸；控件唤起必须挂在 Video 自身。
+            .onClick((): void => {
+              this.showControls();
             })
-              .autoPlay(false)   // 永不自动播放，由 syncPlayback 统一控制
-              .controls(false)   // 屏保上不要系统控制条
-              .loop(this.card.video.loop)
-              .muted(this.card.video.muted)
-              .objectFit(ImageFit.Contain)
+            .onPrepared((event?: PreparedInfo): void => {
+              const duration = event !== undefined ? event.duration : -1;
+              const systemAudio = screenSaverSystemAudioState.read();
+              ScreenSaverLogger.info(`video component prepared: duration=${duration} ` +
+                `muted=${!this.soundEnabled()} systemVolume=${systemAudio.volume} ` +
+                `systemMuted=${systemAudio.muted} track=${this.audioTrackState}`);
+              this.handlePrepared(duration);
+            })
+            .onStart((): void => {
+              const systemAudio = screenSaverSystemAudioState.read();
+              ScreenSaverLogger.info(`video component start: muted=${!this.soundEnabled()} ` +
+                `systemVolume=${systemAudio.volume} systemMuted=${systemAudio.muted} ` +
+                `track=${this.audioTrackState} renderers=` +
+                screenSaverSystemAudioState.describeActiveRenderers());
+              this.playbackPhase = 'playing';
+              this.playbackError = '';
+            })
+            .onPause((): void => {
+              if (this.playbackPhase !== 'finished' && this.playbackPhase !== 'error') {
+                this.playbackPhase = 'paused';
+              }
+            })
+            .onFinish((): void => {
+              if (this.card.video.loop) {
+                this.currentSec = 0;
+                return;
+              }
+              this.card.video.playing = false;
+              this.playbackPhase = 'finished';
+              if (this.durationValid()) {
+                this.currentSec = this.durationSec;
+              }
+              screenSaverAppModel.save();
+            })
+            .onError((err?: BusinessError): void => {
+              const code = err !== undefined ? err.code : -1;
+              ScreenSaverLogger.warn(`video component error: code=${code}`);
+              if (this.pendingSeekSec >= 0) {
+                this.revertSeek('进度跳转失败，已回到原位置');
+              }
+              this.prepared = false;
+              this.playbackPhase = 'error';
+              this.playbackError = code >= 0 ? `视频播放失败（${code}）` : '视频播放失败';
+              this.controlsVisible = false;
+              screenSaverVideoSoundSession.disable(this.card.id);
+            })
+            .onSeeking((event?: PlaybackInfo): void => {
+              ScreenSaverLogger.info(`video seeking: time=${event !== undefined ? event.time : -1}`);
+              if (event !== undefined && this.seekDragging) {
+                this.seekPreviewSec = Math.min(event.time, this.sliderMax());
+              }
+            })
+            .onSeeked((event?: PlaybackInfo): void => {
+              if (event !== undefined) {
+                this.handleSeeked(event.time);
+              }
+            })
+            .onUpdate((event?: PlaybackInfo): void => {
+              if (event !== undefined) {
+                this.handleUpdate(event.time);
+              }
+            })
+
+          // 透明点击捕获层：Video 原生 surface 不透传点击，用它可靠唤起控件。
+          // 控件显示时移除，避免遮挡 Slider/按钮的命中测试。
+          if (!this.controlsVisible) {
+            Stack()
               .width('100%')
               .height('100%')
               .backgroundColor(Color.Transparent)
-              // 原生 surface 的圆角：官方 FAQ 要求「同组件设置 borderRadius +
-              // 背景色透明」，父容器再叠一层 clip 裁剪兜底（双保险）。
-              .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
-              .clip(true)
-              .onPrepared((): void => {
-                // 播放器就绪后才能 start；如果开关已经打开，这里立即开始播
-                ScreenSaverLogger.info('video component prepared');
-                this.prepared = true;
-                this.syncPlayback();
-              })
-              .onFinish((): void => {
-                // 播完（未开循环）：开关复位，回到封面帧状态
-                if (!this.card.video.loop) {
-                  this.card.video.playing = false;
-                }
-              })
-              .onError((): void => {
-                ScreenSaverLogger.warn('video component error');
-                this.prepared = false;
+              .onClick((): void => {
+                ScreenSaverLogger.info(`video catcher tap: card=${this.card.id}`);
+                this.showControls();
               })
           }
+
+          // 控件放在内容容器内：严格受视频内容边界裁剪，不会超出卡片。
+          if (this.cardMode === 'play' && this.controlsVisible &&
+            this.playbackPhase !== 'error') {
+            if (this.compactControls()) {
+              this.compactOverlay()
+            } else {
+              this.fullOverlay()
+            }
+          }
         }
-        // 内容容器：紧贴视频比例 + 与卡片一致的圆角裁剪（变更项 2）
         .width(this.contentWidth())
         .height(this.contentHeight())
         .align(Alignment.Center)
         .borderRadius(SCREEN_SAVER_METRICS.cardRadius)
         .clip(true)
+
+        if (this.playbackPhase === 'error') {
+          Column({ space: 4 }) {
+            Text('视频播放失败')
+              .fontSize(this.density() === 'minimal' ? SCREEN_SAVER_FONT.L6 : SCREEN_SAVER_FONT.L5)
+              .fontColor(this.palette().textPrimary)
+              .textShadow(this.textShadow())
+            if (this.playbackError.length > 0 && this.density() !== 'minimal') {
+              Text(this.playbackError)
+                .fontSize(SCREEN_SAVER_FONT.L6)
+                .fontColor(this.palette().textSecondary)
+                .textShadow(this.textShadow())
+            }
+            if (this.cardMode === 'edit' && this.density() !== 'minimal') {
+              Text('重选')
+                .fontSize(SCREEN_SAVER_FONT.L5)
+                .fontColor('#4A9EFF')
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .borderRadius(6)
+                .backgroundColor('#26262B')
+                .onClick((): void => {
+                  this.handleReselect();
+                })
+            }
+          }
+          .width('100%')
+          .height('100%')
+          .justifyContent(FlexAlign.Center)
+          .backgroundColor('#66000000')
+        }
       }
+
       if (this.emptyVisible) {
         if (this.density() === 'minimal') {
-          // 1×1 这类极小尺寸只留一行提示，保证「不是空白」且不溢出
           Text('无视频')
             .fontSize(SCREEN_SAVER_FONT.L6)
             .fontColor(this.palette().textTertiary)
@@ -358,6 +846,7 @@ export struct ScreensaverVideoCard {
           .justifyContent(FlexAlign.Center)
         }
       }
+
       if (this.unavailable) {
         Column({ space: 6 }) {
           Text('视频不可用')
@@ -371,7 +860,6 @@ export struct ScreensaverVideoCard {
               .fontColor(this.palette().textTertiary)
               .textShadow(this.textShadow())
           }
-          // 「重选」只在编辑态 + 完整档显示（小尺寸放不下按钮，整卡点按仍可进配置）
           if (this.cardMode === 'edit' && this.density() === 'full') {
             Column() {
               Text('重选')
@@ -396,10 +884,14 @@ export struct ScreensaverVideoCard {
     .width('100%')
     .height('100%')
     .clip(true)
-    // 变更项 1/3.1：卡片自身无底色、无边框——画面未铺满时留白完全透明，
-    // 露出屏保整体背景（不再是黑色块）。
     .backgroundColor(Color.Transparent)
-    // 记录卡片实际尺寸：内容容器按比例实时重算（缩放/拖拽过程中圆角随之更新）。
+    .onClick((): void => {
+      if (this.cardMode === 'play' && this.card.video.uri.length > 0 && !this.unavailable &&
+        this.playbackPhase !== 'error') {
+        ScreenSaverLogger.info('video card surface tap');
+        this.showControls();
+      }
+    })
     .onAreaChange((oldArea: Area, newArea: Area): void => {
       this.cardW = typeof newArea.width === 'number' ? newArea.width : 0;
       this.cardH = typeof newArea.height === 'number' ? newArea.height : 0;

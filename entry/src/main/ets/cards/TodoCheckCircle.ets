@@ -8,7 +8,8 @@
  * 布局约束（必须与改造前一致）：
  *   - 外层占位 17×17vp；行左内边距缩到 1.2vp + 行距 1.5vp，
  *     把宽度让给圆，同时保持文字起始缩进不变；
- *   - 圆可视 15vp，在 17vp 占位内居中，左右各有 1vp 余量，不挤压变形；
+ *   - 圆可视直径 = 当前待办文字字号 × 2/3（16fp→约 10.7vp），
+ *     在 17vp 占位内居中，不挤压变形；热区不随视觉缩小；
  *   - 占位高 17vp 低于文字行高（L4 约 19.4vp），不抬高行高/行距；
  *   - 热区限制在「卡片左边缘 → 圆右缘」（19vp 宽）× 整行高，
  *     不覆盖同行文字、不与相邻行重叠（44×44 的规格冲突见交付报告）。
@@ -33,6 +34,8 @@ export struct TodoCheckCircle {
   @Param cardTone: ScreensaverInkTone = 'light';
   /** 热区高度 = 当前字号档的既有行距（常规 23vp / minimal 21vp）。 */
   @Param hitHeight: number = SCREEN_SAVER_TODO_CHECK.hitHeightRegular;
+  /** 当前待办文字字号（fp）；可视圆按其 2/3 计算。 */
+  @Param fontSize: number = 16;
   @Event onToggle: () => void = (): void => {};
 
   private tokens(): ScreensaverTodoCheckTokens {
@@ -41,6 +44,14 @@ export struct TodoCheckCircle {
 
   private palette(): ScreensaverCardPalette {
     return screenSaverCardPalette(this.cardTone);
+  }
+
+  private visualSize(): number {
+    return this.fontSize * this.tokens().visualScale;
+  }
+
+  private innerDotSize(): number {
+    return this.visualSize() * this.tokens().innerDotRatio;
   }
 
   private ringColor(): string {
@@ -63,20 +74,20 @@ export struct TodoCheckCircle {
     Stack({ alignContent: Alignment.Center }) {
       Stack() {
         Circle()
-          .width(this.tokens().visualSize)
-          .height(this.tokens().visualSize)
+          .width(this.visualSize())
+          .height(this.visualSize())
           .fill(Color.Transparent)
           .stroke(this.ringColor())
           .strokeWidth(this.tokens().strokeWidth)
         if (this.completed) {
           Circle()
-            .width(this.tokens().innerDotSize)
-            .height(this.tokens().innerDotSize)
+            .width(this.innerDotSize())
+            .height(this.innerDotSize())
             .fill(this.palette().textPrimary)
         }
       }
-      .width(this.tokens().visualSize)
-      .height(this.tokens().visualSize)
+      .width(this.visualSize())
+      .height(this.visualSize())
       .opacity(this.completed ? this.tokens().completedOpacity : 1)
     }
     .width(this.tokens().containerWidth)

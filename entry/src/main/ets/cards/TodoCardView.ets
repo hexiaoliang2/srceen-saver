@@ -337,6 +337,7 @@ export struct ScreensaverTodoCard {
         interactive: this.canToggle(),
         cardTone: this.cardTone,
         hitHeight: this.hitHeight(),
+        fontSize: this.density() === 'minimal' ? SCREEN_SAVER_FONT.L5 : SCREEN_SAVER_FONT.L4,
         onToggle: (): void => {
           this.handleToggle(item.id);
         }

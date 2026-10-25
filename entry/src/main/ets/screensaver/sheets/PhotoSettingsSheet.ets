@@ -6,10 +6,9 @@
  * 【这个文件是干什么的】
  * 相册卡片的设置抽屉，是四个设置面板里最复杂的一个。
  * 功能分两大块：
- *   1. 照片来源：三种方式——
+ *   1. 照片来源：两种方式——
  *      a. 从图库选择照片（系统 picker，无需任何权限）；
- *      b. 浏览系统相册（需要相册读取权限，可选「全部照片/收藏/用户相册」）；
- *      c. 内置示例图片（7 张 raw 资源，释放到应用沙箱后当作本地照片用）。
+ *      b. 浏览系统相册（需要相册读取权限，可选「全部照片/收藏/用户相册」）。
  *   2. 播放行为：自动轮播（间隔下限 15s）、切换间隔、播放顺序（随机/时间序）、
  *      信息显示（拍摄日期/文件名）、预取下一张、删除卡片。
  *
@@ -17,11 +16,6 @@
  * build() 里用 albumPanelVisible 在两个 @Builder 之间切换：
  *   - mainPanel：主设置面板；
  *   - albumSourcePanel：点「来源相册」进入的相册选择子面板（含返回按钮）。
- *
- * 【示例图片的实现】
- * raw 资源不能直接当照片 uri 用，所以 ensureSamplePhotos() 把
- * raw 文件复制到应用沙箱 filesDir/sample_photos/，返回沙箱路径列表
- * （file:// 沙箱路径可直接被 Image 组件加载）。
  *
  * 【权限设计的三个层次】
  *   - picker 方式：系统代取，零权限，永远可用（保底方案）；
@@ -31,25 +25,20 @@
  */
 
 import { common } from '@kit.AbilityKit';
-import { fileIo } from '@kit.CoreFileKit';
 import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverSizePresetRow,
   ScreenSaverToggleRow,
-  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
-import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import { ScreensaverPhotoCard } from '../../cards/PhotoCardView';
 import {
   SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS,
   ScreensaverCardInstance,
   ScreensaverNumberOption,
-  ScreensaverSizePreset
 } from '../../model/ConfigModels';
 import {
   screenSaverMediaAccess,
@@ -59,20 +48,6 @@ import {
 
 /** 「全部照片」相册的固定标识（区别于真实相册 key）。 */
 const ALBUM_ALL_KEY: string = 'all';
-/** 内置示例图片的文件名（对应 resources/rawfile/sample_photos/ 下的资源）。 */
-const SAMPLE_PHOTO_NAMES: string[] = [
-  'photo_landscape_4k.jpg',
-  'photo_portrait.jpg',
-  'photo_square.jpg',
-  'photo_lowres.jpg',
-  'photo_dark.jpg',
-  'photo_wide.jpg',
-  // 变更项 4 的回归素材：926×1000（比例 0.926）与 2×2 卡片比例一致，
-  // 用来验证「内容比例 = 卡片比例 → 完全显示且无黑边」这条规则。
-  'photo_grid_ratio.jpg'
-];
-/** 示例图片释放到沙箱时的目录名。 */
-const SAMPLE_PHOTO_DIR: string = 'sample_photos';
 
 interface PhotoOrderOption {
   value: string;
@@ -130,69 +105,6 @@ export struct ScreenSaverPhotoSettingsPanel {
     } finally {
       this.busy = false;
     }
-  }
-
-  /**
-   * 方式三：使用内置示例图片。
-   * ensureSamplePhotos() 把 raw 资源释放到沙箱，返回沙箱路径当作照片 uri。
-   */
-  private async useSamplePhotos(): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-    this.busy = true;
-    this.statusText = '';
-    try {
-      const context = this.uiContext();
-      if (context === undefined) {
-        return;
-      }
-      const sampleDir = `${context.filesDir}/${SAMPLE_PHOTO_DIR}`;
-      const existingUris = await this.ensureSamplePhotos(context, sampleDir);
-      if (existingUris.length > 0) {
-        this.card.photo.uris = existingUris;
-        this.card.photo.sourceAlbum = ALBUM_ALL_KEY;
-        screenSaverAppModel.save();
-        this.statusText = `已添加 ${existingUris.length} 张示例图片`;
-      }
-    } finally {
-      this.busy = false;
-    }
-  }
-
-  /**
-   * 把 rawfile 里的示例图片复制到应用沙箱（只复制一次，已存在则跳过）。
-   * 返回沙箱里的文件路径列表——这些路径可以直接被 Image 组件加载。
-   * raw 资源本身不能作为照片 uri 使用，必须先「释放」到沙箱。
-   */
-  private async ensureSamplePhotos(context: common.UIAbilityContext, sampleDir: string): Promise<string[]> {
-    try {
-      fileIo.mkdirSync(sampleDir);
-    } catch (mkdirError) {
-      ScreenSaverLogger.info('sample photo dir already ready');
-    }
-    const paths: string[] = [];
-    for (const name of SAMPLE_PHOTO_NAMES) {
-      const targetPath = `${sampleDir}/${name}`;
-      // 已释放过就跳过（accessSync 不存在会抛异常，按不存在处理）
-      let exists = false;
-      try {
-        exists = fileIo.accessSync(targetPath);
-      } catch (accessError) {
-        exists = false;
-      }
-      if (!exists) {
-        const content = await context.resourceManager.getRawFileContent(`${SAMPLE_PHOTO_DIR}/${name}`);
-        const file = fileIo.openSync(targetPath, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.CREATE);
-        try {
-          fileIo.writeSync(file.fd, content.buffer as ArrayBuffer);
-        } finally {
-          fileIo.closeSync(file);
-        }
-      }
-      paths.push(targetPath);
-    }
-    return paths;
   }
 
   /** 清空照片列表（卡片会显示空态占位）。 */
@@ -332,18 +244,6 @@ export struct ScreenSaverPhotoSettingsPanel {
   /** 面板标题：带实例标识（如「相册 1 · 设置」），便于核对面板归属哪张卡片。 */
   private panelTitle(): string {
     return `${screenSaverAppModel.cardInstanceTitle(this.card)} · 设置`;
-  }
-
-  /**
-   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardToDetailed：吸附 + 碰撞校验
-   * + 吸附/占用反馈，变更项 2 通道 A）。
-   */
-  private applySizePreset(preset: ScreensaverSizePreset): void {
-    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
-    const message = screenSaverResizeFeedbackText(outcome);
-    if (message.length > 0) {
-      this.toast(message);
-    }
   }
 
   /**
@@ -539,18 +439,12 @@ export struct ScreenSaverPhotoSettingsPanel {
           }
           .width('100%')
 
-          // ---------- 三个来源操作 ----------
+          // ---------- 来源操作 ----------
           Row({ space: 8 }) {
             ScreenSaverChip({
               label: this.busy ? '请稍候…' : '从图库选择照片',
               onTap: (): void => {
                 void this.pickPhotos();
-              }
-            })
-            ScreenSaverChip({
-              label: '示例图片（7 张）',
-              onTap: (): void => {
-                void this.useSamplePhotos();
               }
             })
             ScreenSaverChip({
@@ -633,18 +527,6 @@ export struct ScreenSaverPhotoSettingsPanel {
             }
           }
           .width('100%')
-
-          // ---------- 尺寸 ----------
-          // 预设来自尺寸矩阵；相册卡任意 1..4 × 1..6 都合法（含 1×1、1×3），
-          // 这里只放几个常用档位，任意的奇数跨度仍可在编辑态拖拽缩放到。
-          ScreenSaverSizePresetRow({
-            presets: screenSaverSizePresets('photo'),
-            currentCols: this.card.colSpan,
-            currentRows: this.card.rowSpan,
-            onPick: (preset: ScreensaverSizePreset): void => {
-              this.applySizePreset(preset);
-            }
-          })
 
           // ---------- 信息显示 ----------
           // 显示拍摄日期（无则回退文件名）。

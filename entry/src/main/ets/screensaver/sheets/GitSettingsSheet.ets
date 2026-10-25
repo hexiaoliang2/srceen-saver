@@ -27,20 +27,16 @@ import {
   ScreenSaverChip,
   ScreenSaverDeleteCardRow,
   ScreenSaverSheetHeader,
-  ScreenSaverSizePresetRow,
   ScreenSaverToggleRow,
-  screenSaverResizeFeedbackText
 } from '../../common/SheetParts';
 import { SCREEN_SAVER_COLORS } from '../../common/ScreenSaverStyle';
 import { ScreenSaverLogger } from '../../common/Logger';
 import { screenSaverAppModel } from '../../model/AppModel';
 import { screenSaverGitViewModel } from '../../model/GitViewModel';
-import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import { ScreensaverGitCard } from '../../cards/GitCardView';
 import {
   SCREEN_SAVER_GIT_WEEK_OPTIONS,
   ScreensaverCardInstance,
-  ScreensaverSizePreset
 } from '../../model/ConfigModels';
 
 interface PaletteOption {
@@ -125,19 +121,6 @@ export struct ScreenSaverGitSettingsPanel {
   /** 面板标题：带实例标识（如「Git 贡献 · 设置」），便于核对面板归属哪张卡片。 */
   private panelTitle(): string {
     return `${screenSaverAppModel.cardInstanceTitle(this.card)} · 设置`;
-  }
-
-  /**
-   * 应用尺寸矩阵里的快捷尺寸（走 AppModel.resizeCardToDetailed：吸附 + 碰撞校验
-   * + 吸附/占用反馈，变更项 2 通道 A）。
-   * Git 卡小于 2×2 时矩阵会降级为「数字摘要」而不是热力图。
-   */
-  private applySizePreset(preset: ScreensaverSizePreset): void {
-    const outcome = screenSaverAppModel.resizeCardToDetailed(this.card.id, preset.colSpan, preset.rowSpan);
-    const message = screenSaverResizeFeedbackText(outcome);
-    if (message.length > 0) {
-      this.toast(message);
-    }
   }
 
   build() {
@@ -289,17 +272,6 @@ export struct ScreenSaverGitSettingsPanel {
             }
           }
           .width('100%')
-
-          // ---------- 尺寸 ----------
-          // 预设来自尺寸矩阵；小尺寸会把热力图降级为「总提交数 + 近 7 天迷你条」。
-          ScreenSaverSizePresetRow({
-            presets: screenSaverSizePresets('git'),
-            currentCols: this.card.colSpan,
-            currentRows: this.card.rowSpan,
-            onPick: (preset: ScreensaverSizePreset): void => {
-              this.applySizePreset(preset);
-            }
-          })
 
           // ---------- 断网缓存 ----------
           ScreenSaverToggleRow({

@@ -52,7 +52,7 @@ import {
   ScreenSaverWindowInsets
 } from '../common/WindowController';
 import { screenSaverVibration } from '../common/VibrationHelper';
-import { screenSaverVideoThumb } from '../common/VideoThumb';
+import { screenSaverVideoSoundSession } from '../common/VideoSoundSession';
 import { screenSaverOpenEntry, ScreenSaverLinkResult } from '../common/AppLinkLauncher';
 import { screenSaverRequestQuotesRefreshFor } from '../model/QuotesViewModel';
 import { ScreensaverCardHost } from '../cards/CardHost';
@@ -350,9 +350,13 @@ export struct ScreenSaverPlayPage {
   private appStateListener: ScreenSaverAppStateListener = (active: boolean): void => {
     this.pageActive = active;
     if (active) {
+      // 回前台：所有视频卡回到静音，播放状态按原配置恢复。
+      screenSaverVideoSoundSession.reset('app-foreground');
       this.startBurnInTimer();
       this.startBatteryWatch();
     } else {
+      // 退后台：先释放声音，cardActive=false 会暂停播放。
+      screenSaverVideoSoundSession.reset('app-background');
       this.stopBurnInTimer();
       this.stopBatteryWatch();
       this.hideCapsule();
@@ -415,6 +419,8 @@ export struct ScreenSaverPlayPage {
    */
   private onPageShown(): void {
     this.pageActive = true;
+    // 首次显示/从设置页返回/回前台：统一重置视频声音（不持久化）。
+    screenSaverVideoSoundSession.reset('page-shown');
     // 从「屏保设置」返回时同步固定锁屏主题；主题选择器已在设置页持久化。
     this.galleryThemeIndex = screenSaverClampGalleryTheme(
       screenSaverAppModel.layout.settings.galleryThemeIndex);
@@ -442,6 +448,8 @@ export struct ScreenSaverPlayPage {
    */
   private onPageHidden(): void {
     this.pageActive = false;
+    // 进入设置/离开屏保：释放声音并暂停（cardActive=false 驱动）。
+    screenSaverVideoSoundSession.reset('page-hidden');
     this.hideCapsule();
     this.stopBurnInTimer();
     this.stopBatteryWatch();
@@ -500,6 +508,7 @@ export struct ScreenSaverPlayPage {
       return;
     }
     this.modeSwitching = true;
+    screenSaverVideoSoundSession.reset('cover-switch');
     this.hideCapsule();
     if (target === 'gallery') {
       this.stopBurnInTimer();
@@ -598,6 +607,8 @@ export struct ScreenSaverPlayPage {
    * 播放态优先用重排结果。
    */
   private onBreakpointChanged(value: ScreenSaverBreakpoint): void {
+    // 旋转/宽度变化会重排并重绘卡片；按“卡片重绘”规则统一静音。
+    screenSaverVideoSoundSession.reset('breakpoint-redraw');
     this.columns = value.columns;
     this.rows = value.rows;
     // 横屏方向固定 5×2，不使用竖屏的宽屏重排（否则 4×8 布局会被再折算一次）。
@@ -1007,15 +1018,15 @@ export struct ScreenSaverPlayPage {
    * 屏保展示态的卡片点击——**变更项 2 / 3 的唯一拦截点**。
    *
    * 屏保态与编辑态的差异全部集中在这里，不在各卡片里分别特判：
-   *   · 视频卡   → 切换播放/停止（变更项 3）
+   *   · 视频卡   → 由卡片自身控件处理：点画面只显示控件，不切播放/不唤胶囊
    *   · 跳转卡   → 发起跳转（变更项 2）
    *   · 其它卡片 → 保持原语义：唤出「退出屏保」胶囊
    * 退出方式不变：点空白处唤胶囊、返回键退出（点可交互卡片不再唤胶囊）。
    */
   private handlePlayModeCardTap(card: ScreensaverCardInstance): void {
     if (card.cardType === 'video') {
-      this.cardActionAtMs = Date.now();
-      this.toggleVideoPlayback(card);
+      // 视频卡由自身控件层处理：点画面只显示控件，不切播放、不唤胶囊。
+      // 长按仍由卡片外层 LongPressGesture 进入设置。
       return;
     }
     if (card.cardType === 'entry') {
@@ -1038,24 +1049,6 @@ export struct ScreenSaverPlayPage {
     // 其它卡片没有卡片级动作：走原来的「唤胶囊」路径
     ScreenSaverLogger.info(`play-mode card tap: pass through ${card.cardType}`);
     this.handleScreenTap();
-  }
-
-  /**
-   * 屏保态点视频卡：切换播放/停止。
-   * 未选视频 / 视频不可用时给出明确提示（否则用户会以为「点了没反应」）。
-   */
-  private toggleVideoPlayback(card: ScreensaverCardInstance): void {
-    if (card.video.uri.length === 0) {
-      this.toast('未选择视频：请在编辑模式里配置');
-      return;
-    }
-    if (!screenSaverVideoThumb.probeReadable(card.video.uri)) {
-      this.toast('视频不可用：请在编辑模式里重新选择');
-      return;
-    }
-    card.video.playing = !card.video.playing;
-    screenSaverAppModel.save();
-    ScreenSaverLogger.info(`video toggle by tap: playing=${card.video.playing}`);
   }
 
   /**
@@ -1172,6 +1165,8 @@ export struct ScreenSaverPlayPage {
    */
   private openSheetForCard(cardId: string, kind: SheetKind): void {
     ScreenSaverLogger.info(`open sheet kind=${kind} cardId=${cardId}`);
+    // 进设置前释放声音；sheetKind 变化会让 cardActive=false，视频同时暂停。
+    screenSaverVideoSoundSession.reset('open-settings');
     this.selectedCardId = cardId;
     this.sheetCardId = cardId;
     this.sheetKind = kind;
@@ -1195,6 +1190,8 @@ export struct ScreenSaverPlayPage {
   private closeSheet(): void {
     this.sheetVisible = false;
     this.sheetKind = 'none';
+    // 从设置返回屏保：再次统一静音（打开时已重置，这里覆盖面板内播放预览）。
+    screenSaverVideoSoundSession.reset('close-settings');
   }
 
   /**
@@ -1218,6 +1215,7 @@ export struct ScreenSaverPlayPage {
     if (this.selectedCardId === cardId) {
       this.selectedCardId = '';
     }
+    screenSaverVideoSoundSession.reset('card-removed');
     screenSaverAppModel.removeCard(cardId);
   }
 
@@ -1991,7 +1989,7 @@ export struct ScreenSaverPlayPage {
         ScreensaverCardHost({
           card: card,
           cardMode: this.editMode ? 'edit' : 'play',
-          cardActive: this.pageActive && !this.editMode,
+          cardActive: this.pageActive && !this.editMode && this.sheetKind === 'none',
           cardTone: this.inkTone,
           cardHalo: this.inkHalo,
           showOverflowHint: this.editMode,
@@ -2378,27 +2376,6 @@ export struct ScreenSaverPlayPage {
           .justifyContent(FlexAlign.SpaceBetween)
           .hitTestBehavior(HitTestMode.None)
           .zIndex(SCREEN_SAVER_EDIT_CHROME_Z)
-          // 调试入口：无传感器环境（模拟器）验证固定锁屏；仅编辑态可见。
-          Column() {
-            Text('调试：进入固定锁屏')
-              .fontSize(10)
-              .fontColor(SCREEN_SAVER_COLORS.textSecondary)
-              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-              .borderRadius(12)
-              .backgroundColor('#66000000')
-              .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
-              .onClick((): void => {
-                this.exitEditMode(false);
-                this.switchLockMode('gallery');
-              })
-          }
-          .width('100%')
-          .height('100%')
-          .justifyContent(FlexAlign.End)
-          .alignItems(HorizontalAlign.Center)
-          .padding({ bottom: 84 })
-          .hitTestBehavior(HitTestMode.None)
-          .zIndex(SCREEN_SAVER_EDIT_CHROME_Z + 1)
         }
         } else {
           // ---------- 固定主题锁屏（gallery）：整体替换内容区，不与卡片叠加 ----------

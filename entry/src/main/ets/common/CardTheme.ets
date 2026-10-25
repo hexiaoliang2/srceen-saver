@@ -69,13 +69,13 @@ export const SCREEN_SAVER_TEXT_SHADOW_RADIUS_PX: number = 6;
  * 详见交付报告「规格冲突」一节。
  */
 export interface ScreensaverTodoCheckTokens {
-  /** 圆的可视直径（vp）。 */
-  visualSize: number;
+  /** 可视直径相对当前待办文字字号的倍率（约 2/3）。 */
+  visualScale: number;
   /** 空心圆描边宽度（vp）。 */
   strokeWidth: number;
-  /** 已完成态内点直径（vp）。 */
-  innerDotSize: number;
-  /** 布局占位宽（= 可视直径，避免子组件被父 Stack 压扁）。 */
+  /** 已完成态内点直径相对可视直径的倍率。 */
+  innerDotRatio: number;
+  /** 布局占位宽（固定 17vp，不随可视圆缩小，避免文字缩进变化）。 */
   containerWidth: number;
   /** 布局占位高（低于文字行高，避免抬高行高）。 */
   containerHeight: number;
@@ -100,11 +100,11 @@ export interface ScreensaverTodoCheckTokens {
 }
 
 export const SCREEN_SAVER_TODO_CHECK: ScreensaverTodoCheckTokens = {
-  // 15vp 可视（外层仍 17vp 占位，居中显示）：比上一版更小，圆与文字之间
-  // 留出约 2.5vp；行左内边距/行距/文字起始缩进与行高保持不变。
-  visualSize: 15,
-  strokeWidth: 1.4,
-  innerDotSize: 6.5,
+  // 可视圆 = 当前文字字号 × 2/3（16fp→约 10.7vp，14fp→约 9.3vp）；
+  // 外层仍 17vp 占位、热区不缩小，文字缩进与行高不变。
+  visualScale: 2 / 3,
+  strokeWidth: 1.2,
+  innerDotRatio: 0.44,
   containerWidth: 17,
   // 17vp：低于 L4/L5 两档的文字行高，保证改造前后行高、行距完全一致。
   containerHeight: 17,

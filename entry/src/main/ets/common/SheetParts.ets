@@ -17,7 +17,7 @@
  */
 
 import { SCREEN_SAVER_COLORS } from './ScreenSaverStyle';
-import { ScreensaverResizeResult, ScreensaverSizePreset } from '../model/ConfigModels';
+
 
 /**
  * 面板顶栏：左边标题、右边「完成」。
@@ -83,68 +83,6 @@ export struct ScreenSaverChip {
       }
     })
   }
-}
-
-/**
- * 「尺寸」行：把该卡片可用的尺寸做成胶囊（变更项 2 通道 A）。
- * 预设列表由 CardCatalog.screenSaverSizePresets 提供（13 档标准尺寸 + 矩阵额外预设），
- * 面板不自己维护一份尺寸清单（避免和矩阵不一致）。
- * 布局用 Flex 自动换行：13 档尺寸在窄面板里一行放不下，必须能折行。
- */
-@ComponentV2
-export struct ScreenSaverSizePresetRow {
-  @Param presets: ScreensaverSizePreset[] = [];
-  @Param currentCols: number = 0;
-  @Param currentRows: number = 0;
-  @Event onPick: (preset: ScreensaverSizePreset) => void = (preset: ScreensaverSizePreset): void => {};
-
-  build() {
-    Column({ space: 6 }) {
-      Row() {
-        Text('尺寸')
-          .fontSize(14)
-          .fontColor('#CCCCCC')
-        Blank()
-        Text(`${this.currentCols}×${this.currentRows}`)
-          .fontSize(12)
-          .fontColor(SCREEN_SAVER_COLORS.textTertiary)
-      }
-      .width('100%')
-      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
-        ForEach(this.presets, (preset: ScreensaverSizePreset) => {
-          Column() {
-            ScreenSaverChip({
-              label: preset.label,
-              selected: this.currentCols === preset.colSpan && this.currentRows === preset.rowSpan,
-              onTap: (): void => {
-                this.onPick(preset);
-              }
-            })
-          }
-          .margin({ right: 8, bottom: 8 })
-        }, (preset: ScreensaverSizePreset): string => `size_${preset.label}`)
-      }
-      .width('100%')
-    }
-    .width('100%')
-  }
-}
-
-/**
- * 尺寸胶囊点击后的统一反馈文案（变更项 2：非法尺寸必须吸附并给出反馈）。
- * 返回空串表示「无需提示」（成功且未被吸附）。
- */
-export function screenSaverResizeFeedbackText(outcome: ScreensaverResizeResult): string {
-  if (!outcome.ok) {
-    return '该尺寸不可用（与其它卡片重叠或越界）';
-  }
-  if (outcome.snapped) {
-    if (outcome.unchanged) {
-      return `已吸附到 ${outcome.colSpan}×${outcome.rowSpan}（与当前尺寸一致）`;
-    }
-    return `已吸附到 ${outcome.colSpan}×${outcome.rowSpan}`;
-  }
-  return '';
 }
 
 /**

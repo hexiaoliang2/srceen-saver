@@ -248,27 +248,6 @@ export interface ScreensaverCardSizeSpec {
   entries: ScreensaverCardSizeEntry[];
 }
 
-/** 尺寸预设：几列几行 + 显示名。 */
-export interface ScreensaverSizePreset {
-  colSpan: number;
-  rowSpan: number;
-  label: string;
-}
-
-/**
- * 缩放结果（变更项 2：设置面板通道的吸附/占用反馈）。
- * ok=false 表示未能落库（重叠/越界/卡片不存在）；
- * snapped=true 表示请求尺寸被吸附到最近的合法值；
- * unchanged=true 表示最终跨度与操作前一致。
- */
-export interface ScreensaverResizeResult {
-  ok: boolean;
-  snapped: boolean;
-  unchanged: boolean;
-  colSpan: number;
-  rowSpan: number;
-}
-
 /** 卡片在网格中的位置：起点 + 占用的行列跨度。 */
 export interface ScreensaverGridPos {
   colStart: number;
@@ -386,7 +365,11 @@ export class ScreensaverPhotoConfig {
   @Trace wifiOnlyPrefetch: boolean = false;
 }
 
-/** 视频卡片配置。muted 默认 true：屏保突然出声会吓到人。 */
+/**
+ * 视频卡片配置。
+ * 声音状态不在这里：由 VideoSoundSession 运行时管理，不写 Preferences；
+ * muted 仅为旧版本兼容字段，读取时恒为 true，不再序列化。
+ */
 @ObservedV2
 export class ScreensaverVideoConfig {
   @Trace uri: string = '';
@@ -802,7 +785,6 @@ export interface ScreensaverRawVideo {
   uri?: string;
   playing?: boolean;
   loop?: boolean;
-  muted?: boolean;
 }
 
 /** Git 配置的原始结构。 */

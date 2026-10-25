@@ -54,6 +54,8 @@ export struct ScreenSaverModeSettingsPage {
   @Local expandedCardId: string = '';
   /** 「添加卡片」列表是否展开。 */
   @Local addPanelVisible: boolean = false;
+  /** 删除后强制刷新列表（卡片数组 splice 的观察依赖）。 */
+  @Local cardsRevisionTick: number = 0;
 
   aboutToAppear(): void {
     screenSaverAppModel.setActiveOrientation(this.mode);
@@ -65,7 +67,12 @@ export struct ScreenSaverModeSettingsPage {
   }
 
   private cards(): ScreensaverCardInstance[] {
-    return screenSaverAppModel.layoutForMode(this.mode).cards;
+    const layout = screenSaverAppModel.layoutForMode(this.mode);
+    const revision = layout.cardsRevision;
+    if (revision < 0 || this.cardsRevisionTick < 0) {
+      return [];
+    }
+    return layout.cards;
   }
 
   private toast(message: string): void {
@@ -122,6 +129,7 @@ export struct ScreenSaverModeSettingsPage {
             this.expandedCardId = '';
           }
           screenSaverAppModel.removeCard(card.id);
+          this.cardsRevisionTick += 1;
           this.toast('已移除卡片');
         }
       }
@@ -134,6 +142,7 @@ export struct ScreenSaverModeSettingsPage {
       this.expandedCardId = '';
     }
     screenSaverAppModel.removeCard(card.id);
+    this.cardsRevisionTick += 1;
   }
 
   /** 添加面板里每种卡片的默认尺寸（按当前方向上限吸附后展示）。 */
@@ -310,8 +319,8 @@ export struct ScreenSaverModeSettingsPage {
   @Builder
   cardRow(card: ScreensaverCardInstance) {
     Column({ space: 8 }) {
-      // ---------- 开关行：标题 + 摘要 + 启停 + 下拉箭头 ----------
-      Row() {
+      // ---------- 开关行：标题 + 摘要 + 启停 + 下拉箭头 + 删除图标 ----------
+      Row({ space: 2 }) {
         Column({ space: 2 }) {
           Text(screenSaverAppModel.cardInstanceTitle(card))
             .fontSize(15)
@@ -337,6 +346,25 @@ export struct ScreenSaverModeSettingsPage {
           .onClick((): void => {
             this.toggleExpanded(card);
           })
+        // 删除：原图 24×24 不拉伸；外层 44×44 保证触控热区。
+        Column() {
+          Image($r('app.media.xmark_circle_fill'))
+            .width(24)
+            .height(24)
+            .objectFit(ImageFit.Contain)
+            .draggable(false)
+            .accessibilityLevel('no')
+        }
+        .width(44)
+        .height(44)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .accessibilityText('删除卡片')
+        .accessibilityRole(AccessibilityRoleType.BUTTON)
+        .accessibilityLevel('yes')
+        .onClick((): void => {
+          this.confirmRemove(card);
+        })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
@@ -382,20 +410,6 @@ export struct ScreenSaverModeSettingsPage {
         .clip(true)
       }
 
-      // ---------- 删除 ----------
-      Row() {
-        Blank()
-        Text('删除卡片')
-          .fontSize(12)
-          .fontColor(SCREEN_SAVER_COLORS.danger)
-          .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-          .borderRadius(8)
-          .backgroundColor('#1C1C20')
-          .onClick((): void => {
-            this.confirmRemove(card);
-          })
-      }
-      .width('100%')
     }
     .width('100%')
     .padding(14)
