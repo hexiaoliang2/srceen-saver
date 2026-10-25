@@ -47,6 +47,14 @@
         ],
       }
     ],
+    "querySchemes": [
+      "bilibili",
+      "openApp.jdMobile",
+      "taobao",
+      "weixin",
+      "alipays",
+      "amihexin"
+    ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"

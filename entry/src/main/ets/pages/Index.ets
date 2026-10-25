@@ -35,6 +35,7 @@ import { ScreenSaverPlayPage } from '../screensaver/ScreensaverPage';
 import { ScreenSaverModeSettingsPage } from '../screensaver/ModeSettingsPage';
 import { ScreenSaverSettingsPage } from '../screensaver/SettingsPage';
 import { ScreenSaverGuidePage } from '../screensaver/GuidePage';
+import { ScreenSaverHomePreview } from '../screensaver/HomePreview';
 import {
   ScreensaverLaunchParam,
   ScreenSaverModeSettingsParam,
@@ -190,10 +191,24 @@ struct ScreenSaverConsole {
         }
         .width('100%')
 
-        // ---------- 一键开启（两个方向） ----------
-        this.startPortraitButton()
+        // ---------- 一键开启（两个方向）：预览在各自按钮上方 ----------
+        Column({ space: 8 }) {
+          ScreenSaverHomePreview({
+            mode: ScreenSaverOrientation.Portrait,
+            dataTick: this.dataTick
+          })
+          this.startPortraitButton()
+        }
+        .width('100%')
 
-        this.startLandscapeButton()
+        Column({ space: 8 }) {
+          ScreenSaverHomePreview({
+            mode: ScreenSaverOrientation.Landscape,
+            dataTick: this.dataTick
+          })
+          this.startLandscapeButton()
+        }
+        .width('100%')
 
         Text('两个方向的卡片、布局与内容配置独立保存；背景、文字颜色、常亮为全局设置。')
           .fontSize(11)

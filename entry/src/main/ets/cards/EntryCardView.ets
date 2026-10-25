@@ -1,94 +1,264 @@
 /**
  * =============================================================================
- * 应用入口卡片视图（EntryCardView.ets，需求 A + 变更项 6）
+ * 应用入口卡片视图（EntryCardView.ets）
  * =============================================================================
  *
- * 【这个文件是干什么的】
- * 一个「只做跳转」的卡片：显示目标 App 的名称与**自绘中性图标**，
- * 点击时用官方 `UIAbilityContext.openLink` 打开用户填写的链接。
+ * 【本轮改造】
+ *   1. 内容组（图标 + 名称 + 副标题）锚点固定为卡片内容区的几何中心：
+ *      整组用 Column / Row + justifyContent(Center) + alignItems(Center)，
+ *      不使用任何条件 top 偏移或条件 padding。
+ *   2. 1×1 / 2×1 / 1×2 三档都显示「图标 + 名称（1 行）+ 副标题（1 行）」，
+ *      各自省略号截断、不折行；1×1 名称 14fp、副标题 10fp（硬性下限）。
+ *   3. ≥2×2 不再渲染「打开」按钮；播放态由屏保页把整卡点击分发到
+ *      AppLinkLauncher（热区 = 整卡）。卡片自身提供按下态反馈（透明度/缩放，
+ *      非动画常驻）。
+ *   4. 自定义图标：entry.iconUri 指向沙箱文件；文件丢失/解码失败时
+ *      onError 或启动校验会回退到「名称首字」中性图标，不空白不崩溃。
  *
- * 【变更项 6：能不能显示目标 App 的真实图标？—— 官方结论：三方应用做不到】
- * 已核实（本地官方文档，核对日期 2026-10-14）：
- *   · 查询**其他**已安装应用的信息（名称/图标）只能走
- *     `bundleManager.getBundleInfo` / `getAllBundleInfo` / `getApplicationInfo`，
- *     这些接口需要 **ohos.permission.GET_BUNDLE_INFO_PRIVILEGED**（系统级权限），
- *     三方应用无法申请（见 FAQ「如何判断应用是否为系统应用」faqs-ability-169）。
- *   · 三方应用可用的只有 `bundleManager.getBundleInfoForSelf`（只能查自己）。
- *   · 「目标应用是否安装」官方可用 `canOpenLink` 判断，但要求目标 scheme
- *     预先声明在 module.json5 的 querySchemes 里（最多 200 个），
- *     而本卡片的链接由用户自由填写，无法预知 scheme，因此不做安装探测
- *     （FAQ「如何判断应用程序是否安装」faqs-ability-142 / faqs-package-structure-62）。
- * 因此按需求改为**降级方案**：
- *   · 图标 = 程序化绘制的**中性图标**（圆角方块 + 名称首字 + 由名称稳定派生的
- *     色相），不含任何第三方商标/图标素材，也不下载、不缓存任何第三方素材；
- *   · 未安装目标应用时：不显示错误图标、不做任何错误提示（屏保态点击失败
- *     只记日志；编辑态「打开」按钮失败才 toast），屏保态规则不变。
- *
- * 【图标加载与缓存策略（变更项 6 要求）】
- * 图标是**纯绘制**的，没有任何图片查询/解码/IO，因此不存在「每次渲染重复查询」
- * 的问题，也就不需要图片缓存；「缓存」体现为：由 displayName 稳定派生的颜色
- * 每次绘制结果完全一致（同一名称永远同一颜色）。若未来系统开放跨应用图标查询，
- * 再在 AppModel 增加 bundleName → icon 的内存 LRU 缓存（当前不可用，不做假实现）。
- *
- * 【尺寸变化时图标如何变化】
- * 图标边长随内容密度档变化：minimal 26vp / compact 34vp / full 40vp，
- * 并且整卡按 GridItem 尺寸等比缩放时图标随容器一起变化（不留固定像素）。
- *
- * 【打开失败怎么办】
- * edit 态「打开」按钮失败 → toast 降级文案（用户正在操作，需要反馈）；
- * play 态（屏保展示态）失败 → 只记日志，不弹提示（屏保态规则不变）。
+ * 【图标尺寸比例】
+ *   图标直径 = clamp(内容区短边 × 0.34, 28, 120)vp；1×1 额外放宽到 0.42
+ *   （仍低于建议上限 45%），因为 1×1 只有图标+两行文字，图标太小会显得空。
+ *   实际比例随 onAreaChange 实测（见交付文档逐档表）。
  * =============================================================================
  */
 
-import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
-import { screenSaverOpenLink } from '../common/AppLinkLauncher';
 import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
-import { screenSaverResolveDensity } from './CardCatalog';
-import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode,
-  ScreensaverInkTone } from '../model/ConfigModels';
+import { SCREEN_SAVER_FONT } from '../common/CardTypography';
+import { screenSaverEntryIconUsable } from '../common/EntryIconStore';
+import { screenSaverPresetAppById, ScreensaverPresetApp } from '../model/EntryPresets';
+import { ScreensaverCardInstance, ScreensaverCardMode, ScreensaverInkTone } from '../model/ConfigModels';
 
 @ComponentV2
 export struct ScreensaverEntryCard {
   @Param card: ScreensaverCardInstance = new ScreensaverCardInstance();
   @Param cardMode: ScreensaverCardMode = 'play';
-  /**
-   * 文字/图标墨色档与投影兜底开关（变更项 3.2/3.3/3.4）。
-   * 由屏保页统一解析后下发（同一来源）；中性图标随档位切换深浅两套。
-   */
   @Param cardTone: ScreensaverInkTone = 'light';
   @Param cardHalo: boolean = false;
 
-  /** 当前墨色档的调色板（文字 + 图标素材版本，同一来源）。 */
+  /** 自定义图标文件不可读/解码失败 → 回退中性图标。 */
+  @Local private iconBroken: boolean = false;
+  /** 按下态（非按钮式反馈；不是常驻动画）。 */
+  @Local private pressed: boolean = false;
+  /** 内容区实测尺寸（去掉内边距后的 vp）。 */
+  @Local private contentW: number = 0;
+  @Local private contentH: number = 0;
+  /** 内容组（图标+名称+副标题）实测包围盒，用于交付文档的占比实测。 */
+  @Local private groupW: number = 0;
+  @Local private groupH: number = 0;
+  private lastRatioLog: string = '';
+
   private palette(): ScreensaverCardPalette {
     return screenSaverCardPalette(this.cardTone);
   }
 
-  /** 文字投影参数（halo 关闭时 radius=0 = 不画）。 */
   private textShadow(): ShadowOptions {
     return screenSaverTextShadow(this.cardHalo, this.palette().halo);
   }
 
-  /** 当前尺寸对应的内容密度档（尺寸矩阵查表）。 */
-  private density(): ScreensaverCardDensity {
-    return screenSaverResolveDensity(this.card.cardType, this.card.colSpan, this.card.rowSpan);
+  aboutToAppear(): void {
+    const uri = this.card.entry.iconUri;
+    this.iconBroken = uri.length > 0 && !screenSaverEntryIconUsable(uri);
+    if (this.iconBroken) {
+      ScreenSaverLogger.warn(`entry icon unusable, fallback to initial: ${uri}`);
+    }
   }
 
-  /** 中性图标边长（vp）：随密度档变化。 */
-  private iconSize(): number {
-    if (this.density() === 'minimal') {
-      return 26;
+  /** 换图标后重新尝试渲染（新文件正常时不再走兜底）。 */
+  @Monitor('card.entry.iconUri')
+  onIconUriChanged(): void {
+    const uri = this.card.entry.iconUri;
+    this.iconBroken = uri.length > 0 && !screenSaverEntryIconUsable(uri);
+  }
+
+  /** 1 列宽：竖向排列（1×1 / 1×2 / 1×3 / 1×4）。 */
+  private vertical(): boolean {
+    return this.card.colSpan <= 1;
+  }
+
+  /** 1×1 专用（最小可用字号 + 最小间距）。 */
+  private oneByOne(): boolean {
+    return this.card.colSpan <= 1 && this.card.rowSpan <= 1;
+  }
+
+  /** 宽扁条（2×1/3×1/4×1）。 */
+  private wideFlat(): boolean {
+    return this.card.rowSpan <= 1 && this.card.colSpan >= 2;
+  }
+
+  /** 预设应用（thirdparty / system）；url 或数据损坏时返回 undefined。 */
+  private preset(): ScreensaverPresetApp | undefined {
+    if (this.card.entry.targetType === 'url') {
+      return undefined;
     }
-    return this.density() === 'compact' ? 34 : 40;
+    return screenSaverPresetAppById(this.card.entry.presetId);
+  }
+
+  /** 预设应用但还没选目标（或历史数据损坏）。 */
+  private presetMissing(): boolean {
+    return this.card.entry.targetType !== 'url' && this.card.entry.presetId.length === 0;
+  }
+
+  private displayName(): string {
+    if (this.presetMissing()) {
+      return '未选择应用';
+    }
+    const name = this.card.entry.displayName.trim();
+    if (name.length > 0) {
+      return name;
+    }
+    const preset = this.preset();
+    if (preset !== undefined) {
+      return preset.name;
+    }
+    return this.card.entry.targetType === 'url' ? '未配置入口' : '未选择应用';
+  }
+
+  private initial(): string {
+    const name = this.displayName();
+    return name.length > 0 ? name.substring(0, 1) : '—';
+  }
+
+  /** 副标题：四种状态各自给诚实的文案（保证所有档位都有一行副标题）。 */
+  private subtitleText(): string {
+    if (this.card.entry.targetType !== 'url' && this.card.entry.invalid) {
+      // 1×1 只有一行 10fp 副标题：截短保证「应用不可用」完整可见。
+      return this.oneByOne() ? '应用不可用' : '应用不可用 · 请重选';
+    }
+    const subtitle = this.card.entry.subtitle.trim();
+    if (subtitle.length > 0) {
+      return subtitle;
+    }
+    if (this.presetMissing()) {
+      return '点击设置 · 选择应用';
+    }
+    const preset = this.preset();
+    if (preset !== undefined) {
+      return preset.subtitle;
+    }
+    return this.card.entry.link.trim().length > 0 ? '点击打开' : '未配置链接';
+  }
+
+  /** 失效态的副标题用提示色；其他状态保持三级文字色。 */
+  private subtitleColor(): string {
+    if (this.card.entry.targetType !== 'url' && this.card.entry.invalid) {
+      return this.palette().entryInvalid;
+    }
+    return this.palette().textTertiary;
+  }
+
+  /** 名称字号：1×1 用 L5；2×1/1×2 用 L4；宽扁 3×1+ 用 L3；≥2×2 用 L1。 */
+  private nameFont(): number {
+    if (this.oneByOne()) {
+      return SCREEN_SAVER_FONT.L5;
+    }
+    if (this.wideFlat()) {
+      return this.card.colSpan >= 3 ? SCREEN_SAVER_FONT.L3 : SCREEN_SAVER_FONT.L4;
+    }
+    if (this.vertical()) {
+      return SCREEN_SAVER_FONT.L4;
+    }
+    return SCREEN_SAVER_FONT.L1;
+  }
+
+  /** 副标题字号：1×1 用 10fp 下限；其余按可用档位。 */
+  private subtitleFont(): number {
+    if (this.oneByOne()) {
+      return SCREEN_SAVER_FONT.L7;
+    }
+    if (this.vertical() || this.wideFlat()) {
+      return SCREEN_SAVER_FONT.L6;
+    }
+    return SCREEN_SAVER_FONT.L4;
+  }
+
+  private textGap(): number {
+    return this.oneByOne() ? 1 : 2;
+  }
+
+  private paddingSize(): number {
+    return this.oneByOne() ? 4 : 6;
+  }
+
+  /** 内容区短边（实测优先；未量到时按 90vp 单元格估算）。 */
+  private shortSide(): number {
+    const fallbackW = this.card.colSpan * 90 - this.paddingSize() * 2;
+    const fallbackH = this.card.rowSpan * 90 - this.paddingSize() * 2;
+    const width = this.contentW > 0 ? this.contentW : Math.max(40, fallbackW);
+    const height = this.contentH > 0 ? this.contentH : Math.max(40, fallbackH);
+    return Math.min(width, height);
+  }
+
+  /** 图标直径：1×1 用短边 42%（≤45%），其余 34%；夹在 28~120vp。 */
+  private iconSize(): number {
+    const ratio = this.oneByOne() ? 0.42 : 0.34;
+    const raw = Math.round(this.shortSide() * ratio);
+    if (raw < 28) {
+      return 28;
+    }
+    if (raw > 120) {
+      return 120;
+    }
+    return raw;
+  }
+
+  private hasCustomIcon(): boolean {
+    return this.card.entry.iconUri.length > 0 && !this.iconBroken;
+  }
+
+  /** 记录内容组包围盒 / 内容区面积（交付文档 §2.2 的实测值来源）。 */
+  private refreshGroupRatio(width: number, height: number): void {
+    this.groupW = width;
+    this.groupH = height;
+    if (this.contentW <= 0 || this.contentH <= 0 || width <= 0 || height <= 0) {
+      return;
+    }
+    const ratio = Math.round((width * height) / (this.contentW * this.contentH) * 1000) / 10;
+    const key = `${this.card.colSpan}x${this.card.rowSpan}|${Math.round(width)}x${Math.round(height)}|${ratio}`;
+    if (key === this.lastRatioLog) {
+      return;
+    }
+    this.lastRatioLog = key;
+    ScreenSaverLogger.info(`entry group ratio ${this.card.colSpan}x${this.card.rowSpan}: ` +
+      `group=${Math.round(width)}x${Math.round(height)} content=${Math.round(this.contentW)}x` +
+      `${Math.round(this.contentH)} ratio=${ratio}% icon=${this.iconSize()}`);
   }
 
   /**
-   * 由名称稳定派生一个色相（0~5 档），映射到当前墨色档的 6 档中性配色。
-   * 目的：同一名称永远同一颜色（这就是「缓存」），不同入口可相互区分；
-   * 颜色全部是本文件/主题文件内的固定色值，不来自任何第三方素材。
-   * 深浅两套由 CardTheme 统一维护：浅色档配深色背景、深色档配浅色背景，
-   * 每档都满足「图标底色对背景 ≥ 3:1、首字对底色 ≥ 4.5:1」的设计目标。
+   * 文字列最大宽度：
+   *   竖向布局 = 内容区宽度；横向布局 = 内容区宽度 - 图标 - 间距。
+   * 用 constraintSize 限制文字，而不是 layoutWeight——layoutWeight 会把
+   * 文字列撑满剩余宽度，图标就被推到左侧，内容组不再整体居中。
    */
+  private textMaxWidth(): number {
+    const fallbackW = this.card.colSpan * 90 - this.paddingSize() * 2;
+    const width = this.contentW > 0 ? this.contentW : Math.max(40, fallbackW);
+    if (this.vertical()) {
+      return width;
+    }
+    const gap = this.wideFlat() ? 8 : 12;
+    return Math.max(40, width - this.iconSize() - gap);
+  }
+
+  /** 中性图标：圆角方块 + 名称首字（自定义图标失效时的唯一兜底）。 */
+  @Builder
+  neutralIcon(size: number) {
+    Column() {
+      Text(this.initial())
+        .fontSize(Math.max(SCREEN_SAVER_FONT.L7, Math.round(size * 0.42)))
+        .fontColor(this.palette().iconInitial)
+        .fontWeight(FontWeight.Medium)
+        .maxLines(1)
+    }
+    .width(size)
+    .height(size)
+    .borderRadius(size * 0.24)
+    .backgroundColor(this.palette().iconTints[this.iconPaletteIndex()])
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /** 由名称稳定派生色相（同一名称永远同一颜色）。 */
   private iconPaletteIndex(): number {
     const name = this.card.entry.displayName;
     if (name.length === 0) {
@@ -101,146 +271,97 @@ export struct ScreensaverEntryCard {
     return hash % 6;
   }
 
-  /** 中性图标底色（随墨色档切换深浅两套，见 CardTheme）。 */
-  private iconColor(): string {
-    return this.palette().iconTints[this.iconPaletteIndex()];
-  }
-
-  /** 名称首字（极简档与图标内都用，1×1 放不下完整名称）。 */
-  private initial(): string {
-    const name = this.card.entry.displayName;
-    if (name.length === 0) {
-      return '—';
-    }
-    return name.substring(0, 1);
-  }
-
-  /**
-   * 自绘中性图标：圆角方块 + 名称首字。
-   * 无外部素材、无网络请求、无解码；尺寸随密度档变化，
-   * 配色随墨色档切换（可运行时着色，见 CardTheme 的说明）。
-   */
   @Builder
-  neutralIcon(size: number, fontSize: number) {
-    Column() {
-      Text(this.initial())
-        .fontSize(fontSize)
-        .fontColor(this.palette().iconInitial)
+  iconView() {
+    if (this.hasCustomIcon()) {
+      Image(this.card.entry.iconUri)
+        .width(this.iconSize())
+        .height(this.iconSize())
+        .objectFit(ImageFit.Cover)
+        .borderRadius(this.iconSize() * 0.24)
+        .onError((): void => {
+          this.iconBroken = true;
+          ScreenSaverLogger.warn(`entry custom icon render failed: ${this.card.entry.iconUri}`);
+        })
+    } else {
+      this.neutralIcon(this.iconSize())
+    }
+  }
+
+  @Builder
+  titleColumn() {
+    Column({ space: this.textGap() }) {
+      Text(this.displayName())
+        .fontSize(this.nameFont())
+        .fontColor(this.oneByOne() || this.wideFlat() ? this.palette().textSecondary :
+        this.palette().textPrimary)
         .fontWeight(FontWeight.Medium)
         .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(this.vertical() ? TextAlign.Center : TextAlign.Start)
+        .textShadow(this.textShadow())
+      Text(this.subtitleText())
+        .fontSize(this.subtitleFont())
+        .fontColor(this.subtitleColor())
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(this.vertical() ? TextAlign.Center : TextAlign.Start)
+        .textShadow(this.textShadow())
     }
-    .width(size)
-    .height(size)
-    .borderRadius(size * 0.24)
-    .backgroundColor(this.iconColor())
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
-  }
-
-  /**
-   * 打开链接：与「屏保态单击卡片」「设置面板测试打开」共用同一个
-   * AppLinkLauncher 实现。
-   * showFeedback=true（编辑态按钮）失败给 toast；false（屏保态）只记日志。
-   */
-  private async openTarget(showFeedback: boolean): Promise<void> {
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
-    if (context === undefined) {
-      this.notifyResult(false, '无法获取应用上下文', showFeedback);
-      return;
-    }
-    const result = await screenSaverOpenLink(context, this.card.entry.link.trim());
-    if (!result.ok) {
-      this.notifyResult(false, result.reason, showFeedback);
-      return;
-    }
-    ScreenSaverLogger.info(`entry link opened: ${this.card.entry.link}`);
-  }
-
-  /** 失败反馈：编辑态 toast，屏保态只记日志（不弹失败提示）。 */
-  private notifyResult(ok: boolean, reason: string, showFeedback: boolean): void {
-    if (ok) {
-      return;
-    }
-    ScreenSaverLogger.warn(`entry open failed: ${reason}`);
-    if (!showFeedback) {
-      return;
-    }
-    try {
-      this.getUIContext().getPromptAction().showToast({ message: reason, duration: 1500 });
-    } catch (err) {
-      const error = err as Error;
-      ScreenSaverLogger.warn(`toast failed: ${error.message}`);
-    }
-  }
-
-  /** 编辑态「打开」按钮：只有编辑态可点（播放态跳转由屏保页统一分发）。 */
-  private handleTap(): void {
-    if (this.cardMode !== 'edit') {
-      return;
-    }
-    void this.openTarget(true);
+    .alignItems(this.vertical() ? HorizontalAlign.Center : HorizontalAlign.Start)
+    .constraintSize({ maxWidth: this.textMaxWidth() })
   }
 
   build() {
-    Column({ space: 4 }) {
-      if (this.card.entry.displayName.length === 0) {
-        this.neutralIcon(this.iconSize(), this.density() === 'minimal' ? 13 : 16)
-        Text(this.density() === 'minimal' ? '入口' : '未配置入口')
-          .fontSize(this.density() === 'minimal' ? 9 : 11)
-          .fontColor(this.palette().textTertiary)
-          .maxLines(1)
-          .textShadow(this.textShadow())
-      } else if (this.density() === 'minimal') {
-        // 1×1 / 2×1 / 1×2：图标 + 短名（放不下按钮，跳转走屏保态点击或大尺寸）
-        this.neutralIcon(26, 13)
-        Text(this.card.entry.displayName)
-          .fontSize(9)
-          .fontColor(this.palette().textSecondary)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .textShadow(this.textShadow())
+    Column() {
+      if (this.vertical()) {
+        Column({ space: this.oneByOne() ? 2 : 6 }) {
+          this.iconView()
+          this.titleColumn()
+        }
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .onAreaChange((oldArea: Area, newArea: Area): void => {
+          const width = typeof newArea.width === 'number' ? newArea.width : 0;
+          const height = typeof newArea.height === 'number' ? newArea.height : 0;
+          this.refreshGroupRatio(width, height);
+        })
       } else {
-        Row({ space: 8 }) {
-          this.neutralIcon(this.iconSize(), this.density() === 'compact' ? 15 : 18)
-          Column({ space: 1 }) {
-            Text(this.card.entry.displayName)
-              .fontSize(this.density() === 'compact' ? 13 : 15)
-              .fontColor(this.palette().textPrimary)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .textShadow(this.textShadow())
-            if (this.card.entry.subtitle.length > 0) {
-              Text(this.card.entry.subtitle)
-                .fontSize(11)
-                .fontColor(this.palette().textTertiary)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .textShadow(this.textShadow())
-            }
-          }
-          .alignItems(HorizontalAlign.Start)
-          .layoutWeight(1)
+        Row({ space: this.wideFlat() ? 8 : 12 }) {
+          this.iconView()
+          this.titleColumn()
         }
-        .width('100%')
+        .justifyContent(FlexAlign.Center)
         .alignItems(VerticalAlign.Center)
-        // 编辑态才显示「打开」：播放态保持屏保纯净（触摸穿透）。
-        if (this.cardMode === 'edit') {
-          Text('打开')
-            .fontSize(11)
-            .fontColor('#4A9EFF')
-            .padding({ left: 12, right: 12, top: 4, bottom: 4 })
-            .borderRadius(6)
-            .backgroundColor('#26262B')
-            .onClick((): void => {
-              this.handleTap();
-            })
-        }
+        .onAreaChange((oldArea: Area, newArea: Area): void => {
+          const width = typeof newArea.width === 'number' ? newArea.width : 0;
+          const height = typeof newArea.height === 'number' ? newArea.height : 0;
+          this.refreshGroupRatio(width, height);
+        })
       }
     }
     .width('100%')
     .height('100%')
+    .padding(this.paddingSize())
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
-    .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+    .opacity(this.pressed ? 0.62 : 1)
+    .scale({
+      x: this.pressed ? 0.97 : 1,
+      y: this.pressed ? 0.97 : 1
+    })
+    .onAreaChange((oldArea: Area, newArea: Area): void => {
+      const width = typeof newArea.width === 'number' ? newArea.width : 0;
+      const height = typeof newArea.height === 'number' ? newArea.height : 0;
+      this.contentW = Math.max(0, width - this.paddingSize() * 2);
+      this.contentH = Math.max(0, height - this.paddingSize() * 2);
+    })
+    .onTouch((event: TouchEvent): void => {
+      if (event.type === TouchType.Down) {
+        this.pressed = true;
+      } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+        this.pressed = false;
+      }
+    })
   }
 }

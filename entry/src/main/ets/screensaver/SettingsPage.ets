@@ -28,13 +28,19 @@ import { screenSaverApplyFontScale } from '../common/FontScale';
 import { screenSaverAppModel } from '../model/AppModel';
 import { screenSaverMediaAccess } from '../common/MediaAccess';
 import { screenSaverCanvasBackground } from '../common/CanvasBackground';
+import { screenSaverLockGestureController } from '../common/LockGestureController';
 import {
   SCREEN_SAVER_CANVAS_COLORS,
   SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
   SCREEN_SAVER_PHOTO_INTERVAL_OPTIONS,
   ScreensaverCanvasColorOption,
-  ScreensaverStringOption
+  ScreensaverStringOption,
+  screenSaverClampGalleryTheme
 } from '../model/ConfigModels';
+import {
+  screenSaverGalleryThemeName,
+  screenSaverGalleryThemeOf
+} from './gallery/GalleryThemePalette';
 
 /** 背景色选择列表：默认纯黑 + 24 个预设色（变更项 7）。 */
 function screenSaverCanvasColorOptions(): ScreensaverCanvasColorOption[] {
@@ -62,6 +68,9 @@ const TEXT_TONE_OPTIONS: ScreensaverStringOption[] = [
   { value: 'light', label: '白色' }
 ];
 
+/** 固定锁屏主题索引顺序（与 ScreensaverGalleryTheme 一致）。 */
+const GALLERY_THEME_INDICES: number[] = [0, 1, 2, 3];
+
 /** 内置示例背景图的文件名（对应 resources/rawfile/sample_photos/ 下的自生成素材）。 */
 const CANVAS_SAMPLE_FILE: string = 'photo_landscape_4k.jpg';
 /** 内置示例背景图（暗色）：用于验证「较暗图片背景」下的自动文字色判定。 */
@@ -74,6 +83,27 @@ export struct ScreenSaverSettingsPage {
   /** 获取应用上下文（字号缩放、权限设置需要传给系统 API）。 */
   private context(): common.UIAbilityContext | undefined {
     return this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
+  }
+
+  aboutToAppear(): void {
+    screenSaverLockGestureController.probe();
+    const settings = screenSaverAppModel.layout.settings;
+    if (!screenSaverLockGestureController.supported && settings.gestureLockEnabled) {
+      // 换机/系统裁剪导致传感器不可用：开关回落关闭，避免每次进屏保都订阅失败。
+      settings.gestureLockEnabled = false;
+      screenSaverAppModel.save();
+    }
+  }
+
+  /** 手势开关的说明/不可用原因。 */
+  private gestureLockTip(): string {
+    const controller = screenSaverLockGestureController;
+    if (!controller.supported) {
+      return controller.errorText.length > 0 ? controller.errorText : '当前设备不支持接近光/环境光传感器';
+    }
+    const sensor = controller.sensorKind === 'proximity' ? '接近光传感器' : '环境光传感器（相对基线）';
+    return `遮盖前置传感器区域可在卡片锁屏与固定锁屏之间切换（使用${sensor}）；` +
+      '传感器数据仅本机使用，不上传。';
   }
 
   /** 弹 toast 提示。 */
@@ -243,7 +273,7 @@ export struct ScreenSaverSettingsPage {
               SCREEN_SAVER_COLORS.accent : '#33FFFFFF'
             })
           Text(option.label)
-            .fontSize(9)
+            .fontSize(10)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -596,6 +626,87 @@ export struct ScreenSaverSettingsPage {
               '自动档阈值取黑白文字的对比度交叉点（相对亮度 0.179），保证纯色背景下 ' +
               '所选文字色对比度 ≥ 4.5:1（WCAG AA 正文下限）；图片背景局部像素不可预知，' +
               '因此启用轻投影兜底。装饰素材（天气图标等）随档位切换深浅两套。')
+              .fontSize(11)
+              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+              .width('100%')
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(10)
+          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+
+          // ---------- 固定锁屏主题（新交互版：无滑动，主题在此切换） ----------
+          Column({ space: 8 }) {
+            Row() {
+              Column() {
+                Text('固定锁屏主题')
+                  .fontSize(14)
+                  .fontColor('#CCCCCC')
+                Text('仅点击互动 · 无滑动')
+                  .fontSize(11)
+                  .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+                  .margin({ top: 2 })
+              }
+              .alignItems(HorizontalAlign.Start)
+              .layoutWeight(1)
+              Text(screenSaverGalleryThemeName(screenSaverGalleryThemeOf(
+                screenSaverClampGalleryTheme(screenSaverAppModel.layout.settings.galleryThemeIndex))))
+                .fontSize(13)
+                .fontColor(SCREEN_SAVER_COLORS.accent)
+            }
+            .width('100%')
+
+            Row({ space: 8 }) {
+              ForEach(GALLERY_THEME_INDICES, (index: number) => {
+                ScreenSaverChip({
+                  label: screenSaverGalleryThemeName(screenSaverGalleryThemeOf(index)),
+                  selected: screenSaverClampGalleryTheme(
+                    screenSaverAppModel.layout.settings.galleryThemeIndex) === index,
+                  onTap: (): void => {
+                    screenSaverAppModel.layout.settings.galleryThemeIndex = index;
+                    screenSaverAppModel.save();
+                    this.toast(`固定锁屏主题：${screenSaverGalleryThemeName(screenSaverGalleryThemeOf(index))}`);
+                  }
+                })
+              }, (index: number): string => `gallery_theme_${index}`)
+            }
+            .width('100%')
+
+            Text('固定锁屏只支持点击：时间、天气、背景；植物温室额外支持叶片。' +
+              '所有反馈为一次性 300/400ms，静止态无循环动画。')
+              .fontSize(11)
+              .fontColor(SCREEN_SAVER_COLORS.textTertiary)
+              .width('100%')
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(10)
+          .backgroundColor(SCREEN_SAVER_COLORS.bgElevated)
+
+          // ---------- 固定锁屏手势（本轮新增） ----------
+          // 默认关闭；设备缺少接近光/环境光时开关置灰并显示原因。
+          Column({ space: 8 }) {
+            ScreenSaverToggleRow({
+              label: '手势控制（遮盖切换锁屏）',
+              tip: this.gestureLockTip(),
+              isOn: screenSaverAppModel.layout.settings.gestureLockEnabled,
+              rowEnabled: screenSaverLockGestureController.supported,
+              onChange: (value: boolean): void => {
+                const controller = screenSaverLockGestureController;
+                if (value && !controller.supported) {
+                  this.toast(controller.errorText.length > 0 ? controller.errorText : '当前设备不支持该传感器');
+                  return;
+                }
+                screenSaverAppModel.layout.settings.gestureLockEnabled = value;
+                screenSaverAppModel.save();
+                if (!value) {
+                  controller.stop('settings off');
+                }
+                this.toast(value ? '已开启：遮盖传感器区域可切换锁屏' : '已关闭手势控制');
+              }
+            })
+            Text('开启后仅在屏保展示态订阅传感器；离开屏保、切后台、进入设置或关闭开关都会立即解除。' +
+              '固定锁屏不持久化，重新进入应用/屏保默认回到卡片锁屏。')
               .fontSize(11)
               .fontColor(SCREEN_SAVER_COLORS.textTertiary)
               .width('100%')

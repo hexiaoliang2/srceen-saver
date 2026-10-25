@@ -77,7 +77,7 @@ export const SCREEN_SAVER_METRICS: ScreenSaverMetrics = {
   handleVisualSize: 28,
   snapThresholdVp: 8,     // 8vp 内的位移不算拖拽，避免手指微颤误判
   longPressMs: 600,       // 长按 600ms 进入当前方向设置页
-  capsuleAutoHideMs: 2000
+  capsuleAutoHideMs: 8000
 };
 
 // 星期名称表：Date.getDay() 返回 0~6（0 是周日），直接按下标取名。

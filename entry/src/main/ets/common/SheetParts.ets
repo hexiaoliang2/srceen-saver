@@ -156,6 +156,8 @@ export struct ScreenSaverToggleRow {
   @Param label: string = '';
   @Param tip: string = '';
   @Param isOn: boolean = false;
+  /** 整行是否可用；不可用时开关置灰且不回调（用于传感器不支持等场景）。 */
+  @Param rowEnabled: boolean = true;
   @Event onChange: (value: boolean) => void = (value: boolean): void => {};
 
   build() {
@@ -176,8 +178,12 @@ export struct ScreenSaverToggleRow {
       .layoutWeight(1) // 文字区占满剩余宽度，开关始终靠右
       Toggle({ type: ToggleType.Switch, isOn: this.isOn })
         .selectedColor(SCREEN_SAVER_COLORS.accentStrong)
+        .enabled(this.rowEnabled)
+        .opacity(this.rowEnabled ? 1 : 0.45)
         .onChange((value: boolean): void => {
-          this.onChange(value);
+          if (this.rowEnabled) {
+            this.onChange(value);
+          }
         })
     }
     .width('100%')

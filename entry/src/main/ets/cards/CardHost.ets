@@ -111,37 +111,28 @@ export struct ScreensaverCardHost {
         })
       }
     } else if (this.card.cardType === 'weather') {
-      CardScrollView({
-        scrollEnabled: this.cardMode === 'play',
-        overflowHint: this.showOverflowHint,
-        hintColor: this.overflowHintColor(),
-        resetKey: `${this.card.id}-${this.cardMode}-weather`
-      }) {
-        ScreensaverWeatherCard({
-          card: this.card,
-          cardMode: this.cardMode,
-          cardActive: this.cardActive,
-          cardTone: this.cardTone,
-          cardHalo: this.cardHalo,
-          onRequestConfig: (): void => {
-            this.onRequestConfig();
-          }
-        })
-      }
+      // 天气卡按四档固定元素，不依赖滚动：直接渲染才能让根节点的 100% 高度
+      // 撑满格子，四档布局都以内容区中心为锚点（§4.2/§4.4）。
+      ScreensaverWeatherCard({
+        card: this.card,
+        cardMode: this.cardMode,
+        cardActive: this.cardActive,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo,
+        onRequestConfig: (): void => {
+          this.onRequestConfig();
+        }
+      })
     } else if (this.card.cardType === 'entry') {
-      CardScrollView({
-        scrollEnabled: this.cardMode === 'play',
-        overflowHint: this.showOverflowHint,
-        hintColor: this.overflowHintColor(),
-        resetKey: `${this.card.id}-${this.cardMode}-entry`
-      }) {
-        ScreensaverEntryCard({
-          card: this.card,
-          cardMode: this.cardMode,
-          cardTone: this.cardTone,
-          cardHalo: this.cardHalo
-        })
-      }
+      // 入口卡不包 Scroll：内容通过 maxLines + 省略号保证不溢出，
+      // 去掉 Scroll 后根节点的 100% 高度能正确撑满格子，内容组才会真正
+      // 以「卡片内容区几何中心」为锚点（§2.1）；也避免 Scroll 抢点击。
+      ScreensaverEntryCard({
+        card: this.card,
+        cardMode: this.cardMode,
+        cardTone: this.cardTone,
+        cardHalo: this.cardHalo
+      })
     } else if (this.card.cardType === 'quotes') {
       ScreensaverQuotesCard({
         card: this.card,
@@ -150,6 +141,8 @@ export struct ScreensaverCardHost {
         cardTone: this.cardTone,
         cardHalo: this.cardHalo,
         showOverflowHint: this.showOverflowHint,
+        // 屏保页与编辑布局页（同一个 CardHost）保持相同的分时图形态。
+        chartInEdit: true,
         onRequestConfig: (): void => {
           this.onRequestConfig();
         }

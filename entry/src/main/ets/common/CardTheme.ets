@@ -57,6 +57,69 @@ export const SCREEN_SAVER_TEXT_CONTRAST_MIN: number = 4.5;
 export const SCREEN_SAVER_TEXT_SHADOW_RADIUS_PX: number = 6;
 
 /**
+ * 待办勾选圆（TodoCheckCircle）视觉 token。
+ *
+ * 颜色不在这里写死：描边/填充一律取当前墨色档的
+ * palette.textSecondary / palette.textPrimary，自动档随背景明度切换。
+ *
+ * 触控热区说明（规格冲突已记录）：既有卡片的行距仅约 23vp、圆右侧 1vp
+ * 就是文字，因此 44×44 热区必然覆盖相邻行或行文字，违反「相邻热区不重叠」
+ * 与「点文字无动作」。这里取不误触前提下的最大安全热区：卡片左边缘 →
+ * 圆右缘（19vp 宽）× 整行高（常规 23 / minimal 21），并保留一行内不重叠。
+ * 详见交付报告「规格冲突」一节。
+ */
+export interface ScreensaverTodoCheckTokens {
+  /** 圆的可视直径（vp）。 */
+  visualSize: number;
+  /** 空心圆描边宽度（vp）。 */
+  strokeWidth: number;
+  /** 已完成态内点直径（vp）。 */
+  innerDotSize: number;
+  /** 布局占位宽（= 可视直径，避免子组件被父 Stack 压扁）。 */
+  containerWidth: number;
+  /** 布局占位高（低于文字行高，避免抬高行高）。 */
+  containerHeight: number;
+  /** 圆与文字之间的布局间距（vp）。 */
+  rowSpace: number;
+  /** 行左内边距（与行距共同保持文字起始缩进不变）。 */
+  rowLeftPadding: number;
+  /** 热区相对圆组件左边缘的偏移（向左扩到卡片边缘）。 */
+  hitOffsetX: number;
+  /** 热区宽度（卡片左边缘到圆右缘；不覆盖文字）。 */
+  hitWidth: number;
+  /** 常规字号行的热区高度（= 现有行距，避免相邻行重叠）。 */
+  hitHeightRegular: number;
+  /** minimal 档字号行的热区高度。 */
+  hitHeightMinimal: number;
+  /** 已完成态整体不透明度（40%~50%）。 */
+  completedOpacity: number;
+  /** 已完成条目文字不透明度。 */
+  completedTextOpacity: number;
+  /** 同一条连续点击的合并窗口（ms），避免连点反复翻转。 */
+  toggleDebounceMs: number;
+}
+
+export const SCREEN_SAVER_TODO_CHECK: ScreensaverTodoCheckTokens = {
+  // 15vp 可视（外层仍 17vp 占位，居中显示）：比上一版更小，圆与文字之间
+  // 留出约 2.5vp；行左内边距/行距/文字起始缩进与行高保持不变。
+  visualSize: 15,
+  strokeWidth: 1.4,
+  innerDotSize: 6.5,
+  containerWidth: 17,
+  // 17vp：低于 L4/L5 两档的文字行高，保证改造前后行高、行距完全一致。
+  containerHeight: 17,
+  rowSpace: 1.5,
+  rowLeftPadding: 1.2,
+  hitOffsetX: -1.2,
+  hitWidth: 19,
+  hitHeightRegular: 23,
+  hitHeightMinimal: 21,
+  completedOpacity: 0.45,
+  completedTextOpacity: 0.5,
+  toggleDebounceMs: 320
+};
+
+/**
  * 一次卡片皮肤判定的结果：墨色档 + 是否启用投影兜底。
  * 屏保页算一次、整棵卡片树共用（同一来源，避免逐卡片各算各的）。
  */
@@ -97,6 +160,8 @@ export interface ScreensaverCardPalette {
   /** 应用入口卡「中性图标」的首字色与 6 档底色。 */
   iconInitial: string;
   iconTints: string[];
+  /** 应用入口卡「目标失效」提示色（与涨跌色区分，避免误读成行情）。 */
+  entryInvalid: string;
   /**
    * Git 热力图分级配色（index 0 不使用：0 级格全透明，见变更项 3.1 确认结论；
    * 1~4 级 = 提交次数递增）。
@@ -126,6 +191,7 @@ export const SCREEN_SAVER_CARD_PALETTES: Record<ScreensaverInkTone, ScreensaverC
     cardBorder: '#59FFFFFF',
     iconInitial: '#1B1B1B',
     iconTints: ['#AFC3D4', '#BFD2C2', '#D9C3A8', '#C6BCD9', '#D9B4BE', '#AFD0D6'],
+    entryInvalid: '#F2C14E',
     gitLevelsGreen: ['', '#0E4429', '#006D32', '#26A641', '#39D353'],
     gitLevelsBlue: ['', '#0A3069', '#0969DA', '#218BFF', '#79C0FF'],
     gitLevelsGray: ['', '#2E2E30', '#444446', '#5A5A5C', '#707072'],
@@ -154,6 +220,7 @@ export const SCREEN_SAVER_CARD_PALETTES: Record<ScreensaverInkTone, ScreensaverC
     cardBorder: '#59000000',
     iconInitial: '#F7F7F7',
     iconTints: ['#3F5A75', '#3F6B52', '#6E4F2F', '#544569', '#6E3D48', '#2F5F6B'],
+    entryInvalid: '#B26A00',
     gitLevelsGreen: ['', '#0E4429', '#1B7F3A', '#249449', '#2E9E4C'],
     gitLevelsBlue: ['', '#0A3069', '#0B5FC4', '#1470D6', '#2F8FE8'],
     gitLevelsGray: ['', '#3A3A3C', '#565658', '#6E6E70', '#8E8E90'],

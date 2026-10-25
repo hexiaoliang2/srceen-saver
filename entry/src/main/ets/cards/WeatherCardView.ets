@@ -36,12 +36,10 @@ import {
   ScreensaverWeatherArtPalette
 } from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
+import { SCREEN_SAVER_FONT } from '../common/CardTypography';
 import { screenSaverWeatherViewModel } from '../model/WeatherViewModel';
 import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode, ScreensaverInkTone,
   ScreensaverWeatherCondition } from '../model/ConfigModels';
-
-/** 数据源署名（Open-Meteo 条款要求的署名文案）。 */
-const WEATHER_ATTRIBUTION: string = '数据 Open-Meteo';
 
 @ComponentV2
 export struct ScreensaverWeatherCard {
@@ -84,17 +82,44 @@ export struct ScreensaverWeatherCard {
     return this.card.colSpan <= 1;
   }
 
-  /** 大画布：完整档且行高 ≥3 —— 装饰可以做成背景级元素，并多显示两行信息。 */
+  /** 大画布：≥2×2 且行高 ≥3 —— 装饰可以做成背景级元素，并多显示湿度/风力。 */
   private largeCanvas(): boolean {
-    return this.density() === 'full' && this.card.rowSpan >= 3;
+    return this.rich() && this.card.rowSpan >= 3;
   }
 
-  /** 装饰元素尺寸（vp）：随密度与卡片尺寸变化。 */
+  /** 1×1：只显示温度 + 图标。 */
+  private isOneByOne(): boolean {
+    return this.card.colSpan <= 1 && this.card.rowSpan <= 1;
+  }
+
+  /** 窄高（1×2/1×3/1×4）：竖向排列。 */
+  private narrowTall(): boolean {
+    return this.card.colSpan <= 1 && this.card.rowSpan >= 2;
+  }
+
+  /** 宽扁（2×1/3×1/4×1）：横向排列。 */
+  private wideFlat(): boolean {
+    return this.card.rowSpan <= 1 && this.card.colSpan >= 2;
+  }
+
+  /** ≥2×2：全元素 + 后两日。 */
+  private rich(): boolean {
+    return this.card.colSpan >= 2 && this.card.rowSpan >= 2;
+  }
+
+  /** 装饰元素尺寸（vp）：按四档布局分别给值。 */
   private artSize(): number {
-    if (this.density() === 'minimal') {
-      return this.narrow() ? 26 : 30;
+    if (this.isOneByOne()) {
+      return 28;
     }
-    return this.largeCanvas() ? 56 : 30;
+    if (this.narrowTall()) {
+      return 40;
+    }
+    if (this.wideFlat()) {
+      return this.card.colSpan >= 3 ? 34 : 30;
+    }
+    // 大卡不再绘制右下角背景天气图标；内联图标统一 44vp。
+    return 44;
   }
 
   /** 组件挂载：先用缓存注水，满足节流条件才发起刷新。 */
@@ -133,25 +158,74 @@ export struct ScreensaverWeatherCard {
     }
   }
 
-  /** 温度文本：按用户选择的单位换算（℉ = ℃ × 9 / 5 + 32）。 */
-  private tempText(): string {
-    const value = screenSaverWeatherViewModel.tempC;
+  /** 温度换算（℉ = ℃ × 9 / 5 + 32）。 */
+  private convertTemp(celsius: number): number {
     if (this.card.weather.unitCelsius) {
-      return `${value}°`;
+      return celsius;
     }
-    return `${Math.round(value * 9 / 5 + 32)}°`;
+    return Math.round(celsius * 9 / 5 + 32);
   }
 
-  /** 高低温文本（同上换算）。 */
+  /** 温度文本。 */
+  private tempText(): string {
+    return `${this.convertTemp(screenSaverWeatherViewModel.tempC)}°`;
+  }
+
+  /** 高低温文本（去掉空格，2×1 宽度紧张时仍完整可读）。 */
   private rangeText(): string {
-    const high = screenSaverWeatherViewModel.highC;
-    const low = screenSaverWeatherViewModel.lowC;
-    if (this.card.weather.unitCelsius) {
-      return `${high}° / ${low}°`;
+    const high = this.convertTemp(screenSaverWeatherViewModel.highC);
+    const low = this.convertTemp(screenSaverWeatherViewModel.lowC);
+    return `${high}°/${low}°`;
+  }
+
+  /** 明天/后天的最高/最低温列；无数据用「—」占位，不伪造温度。 */
+  private dayRangeText(high: number, low: number): string {
+    if (high < -900 || low < -900) {
+      return '—';
     }
-    const highF = Math.round(high * 9 / 5 + 32);
-    const lowF = Math.round(low * 9 / 5 + 32);
-    return `${highF}° / ${lowF}°`;
+    return `${this.convertTemp(high)}°/${this.convertTemp(low)}°`;
+  }
+
+  /** 明天/后天的天气列；无数据用「—」占位。 */
+  private dayWeatherText(high: number, low: number, text: string): string {
+    if (high < -900 || low < -900) {
+      return '—';
+    }
+    return text.length > 0 ? text : '—';
+  }
+
+  /**
+   * 明天/后天一行：时间 / 最高最低温 / 天气 三列固定宽度，
+   * 两行上下严格对齐（时间列宽 26vp、温度列宽 66vp、天气列占剩余宽度）。
+   */
+  @Builder
+  dayRow(label: string, high: number, low: number, text: string) {
+    Row({ space: 4 }) {
+      Text(label)
+        .fontSize(SCREEN_SAVER_FONT.L6)
+        .fontColor(this.palette().textTertiary)
+        .width(26)
+        .maxLines(1)
+        .textAlign(TextAlign.Start)
+        .textShadow(this.textShadow())
+      Text(this.dayRangeText(high, low))
+        .fontSize(SCREEN_SAVER_FONT.L6)
+        .fontColor(this.palette().textTertiary)
+        .width(66)
+        .maxLines(1)
+        .textAlign(TextAlign.Start)
+        .textShadow(this.textShadow())
+      Text(this.dayWeatherText(high, low, text))
+        .fontSize(SCREEN_SAVER_FONT.L6)
+        .fontColor(this.palette().textTertiary)
+        .layoutWeight(1)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Start)
+        .textShadow(this.textShadow())
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
   }
 
   /** 「湿度 · 风力」行（无数据返回空串，界面隐藏该行）。 */
@@ -200,14 +274,14 @@ export struct ScreensaverWeatherCard {
   emptyHint() {
     Column({ space: 4 }) {
       Text(this.hintText())
-        .fontSize(this.density() === 'minimal' ? 10 : 12)
+        .fontSize(this.isOneByOne() ? SCREEN_SAVER_FONT.L6 : SCREEN_SAVER_FONT.L4)
         .fontColor(this.palette().textSecondary)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .textShadow(this.textShadow())
-      if (this.density() === 'full' && this.cardMode === 'edit') {
+      if (this.cardMode === 'edit' && !this.isOneByOne()) {
         Text('点此打开设置')
-          .fontSize(11)
+          .fontSize(SCREEN_SAVER_FONT.L5)
           .fontColor('#4A9EFF')
       }
     }
@@ -444,65 +518,15 @@ export struct ScreensaverWeatherCard {
     .height(size)
   }
 
-  /** 图标 + 温度（极简档；1 列宽时上下排）。 */
+  /** 1×1：温度 + 天气图标（不显示描述/高低温/后两日）。 */
   @Builder
-  minimalContent() {
-    if (this.narrow()) {
-      Column({ space: 2 }) {
-        this.weatherArt(this.artSize())
-        Text(this.tempText())
-          .fontSize(20)
-          .fontColor(this.palette().textPrimary)
-          .fontWeight(FontWeight.Medium)
-          .maxLines(1)
-          .textShadow(this.textShadow())
-      }
-      .width('100%')
-      .height('100%')
-      .justifyContent(FlexAlign.Center)
-      .alignItems(HorizontalAlign.Center)
-    } else {
-      Row({ space: 6 }) {
-        this.weatherArt(this.artSize())
-        Text(this.tempText())
-          .fontSize(26)
-          .fontColor(this.palette().textPrimary)
-          .fontWeight(FontWeight.Medium)
-          .maxLines(1)
-          .textShadow(this.textShadow())
-      }
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-    }
-  }
-
-  /** 紧凑档：图标 + 温度 + 描述，下面一行高低温。 */
-  @Builder
-  compactContent() {
+  oneByOneContent() {
     Column({ space: 2 }) {
-      Row({ space: 6 }) {
-        this.weatherArt(this.artSize())
-        Column({ space: 1 }) {
-          Text(this.tempText())
-            .fontSize(this.largeCanvas() ? 30 : 26)
-            .fontColor(this.palette().textPrimary)
-            .fontWeight(FontWeight.Medium)
-            .maxLines(1)
-            .textShadow(this.textShadow())
-          Text(screenSaverWeatherViewModel.description)
-            .fontSize(11)
-            .fontColor(this.palette().textSecondary)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .textShadow(this.textShadow())
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-      }
-      .alignItems(VerticalAlign.Center)
-      Text(this.rangeText())
-        .fontSize(10)
-        .fontColor(this.palette().textTertiary)
+      this.weatherArt(this.artSize())
+      Text(this.tempText())
+        .fontSize(SCREEN_SAVER_FONT.L0)
+        .fontColor(this.palette().textPrimary)
+        .fontWeight(FontWeight.Medium)
         .maxLines(1)
         .textShadow(this.textShadow())
     }
@@ -512,90 +536,147 @@ export struct ScreensaverWeatherCard {
     .alignItems(HorizontalAlign.Center)
   }
 
-  /**
-   * 完整档：文字列居中；行高 ≥3 的大卡把装饰放大成「背景元素」放在右下方
-   * （避开编辑态右上角的删除角标），并增加湿度/风力与明日趋势两行。
-   */
+  /** 1×2（窄高）：竖向排列，图标 → 温度 → 天气汉字 → 最高/最低温。 */
   @Builder
-  fullContent() {
-    Stack() {
-      if (this.largeCanvas()) {
-        Column() {
-          this.weatherArt(this.artSize())
-        }
-        .width('100%')
-        .height('100%')
-        .justifyContent(FlexAlign.End)
-        .alignItems(HorizontalAlign.End)
-        .padding({ right: 2, bottom: 2 })
-        .opacity(0.75)
-      }
-      Column({ space: 2 }) {
-        Text(this.tempText())
-          .fontSize(this.largeCanvas() ? 34 : 26)
-          .fontColor(this.palette().textPrimary)
-          .fontWeight(FontWeight.Medium)
-          .maxLines(1)
-          .textShadow(this.textShadow())
-        Text(screenSaverWeatherViewModel.description)
-          .fontSize(12)
-          .fontColor(this.palette().textSecondary)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .textShadow(this.textShadow())
-        Text(this.cityLine())
-          .fontSize(12)
-          .fontColor(this.palette().textSecondary)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 2 })
-          .textShadow(this.textShadow())
-        Text(this.rangeText())
-          .fontSize(11)
-          .fontColor(this.palette().textTertiary)
-          .maxLines(1)
-          .textShadow(this.textShadow())
-        if (this.largeCanvas() && this.statsText().length > 0) {
-          Text(this.statsText())
-            .fontSize(11)
-            .fontColor(this.palette().textTertiary)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .textShadow(this.textShadow())
-        }
-        if (this.largeCanvas() && this.tomorrowText().length > 0) {
-          Text(this.tomorrowText())
-            .fontSize(11)
-            .fontColor(this.palette().textTertiary)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .textShadow(this.textShadow())
-        }
-        Text(WEATHER_ATTRIBUTION)
-          .fontSize(9)
-          .fontColor(this.palette().textTertiary)
-          .maxLines(1)
-          .margin({ top: 2 })
-          .textShadow(this.textShadow())
-      }
-      .width('100%')
-      .height('100%')
-      .justifyContent(FlexAlign.Center)
-      .alignItems(HorizontalAlign.Center)
+  narrowTallContent() {
+    Column({ space: 4 }) {
+      this.weatherArt(this.artSize())
+      Text(this.tempText())
+        .fontSize(SCREEN_SAVER_FONT.L0)
+        .fontColor(this.palette().textPrimary)
+        .fontWeight(FontWeight.Medium)
+        .maxLines(1)
+        .textShadow(this.textShadow())
+      Text(screenSaverWeatherViewModel.description)
+        .fontSize(SCREEN_SAVER_FONT.L5)
+        .fontColor(this.palette().textSecondary)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textShadow(this.textShadow())
+      Text(this.rangeText())
+        .fontSize(SCREEN_SAVER_FONT.L4)
+        .fontColor(this.palette().textTertiary)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textShadow(this.textShadow())
     }
     .width('100%')
     .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  /** 2×1（宽扁）：横向排列，图标 → 温度 →（天气汉字 / 高低温）两行。 */
+  @Builder
+  wideFlatContent() {
+    Row({ space: 6 }) {
+      this.weatherArt(this.artSize())
+      Text(this.tempText())
+        .fontSize(SCREEN_SAVER_FONT.L0)
+        .fontColor(this.palette().textPrimary)
+        .fontWeight(FontWeight.Medium)
+        .maxLines(1)
+        .textShadow(this.textShadow())
+      Column({ space: 1 }) {
+        Text(screenSaverWeatherViewModel.description)
+          .fontSize(SCREEN_SAVER_FONT.L5)
+          .fontColor(this.palette().textSecondary)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textShadow(this.textShadow())
+        Text(this.rangeText())
+          .fontSize(this.card.colSpan >= 3 ? SCREEN_SAVER_FONT.L4 : SCREEN_SAVER_FONT.L5)
+          .fontColor(this.palette().textTertiary)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textShadow(this.textShadow())
+      }
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /**
+   * ≥2×2：今日全部元素 + 后两日（明天/后天）。
+   * 后两日字号 L6=12，严格小于今日描述 L5/高低温 L4/温度 L0；
+   * 行高 ≥3 的大卡才追加湿度/风力，避免 2×2 挤压免责/署名。
+   */
+  @Builder
+  richContent() {
+    Column({ space: 2 }) {
+      Row({ space: 8 }) {
+        this.weatherArt(this.artSize())
+        Column({ space: 1 }) {
+          Text(this.tempText())
+            .fontSize(SCREEN_SAVER_FONT.L0)
+            .fontColor(this.palette().textPrimary)
+            .fontWeight(FontWeight.Medium)
+            .maxLines(1)
+            .textShadow(this.textShadow())
+          Text(screenSaverWeatherViewModel.description)
+            .fontSize(SCREEN_SAVER_FONT.L5)
+            .fontColor(this.palette().textSecondary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .textShadow(this.textShadow())
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Text(this.rangeText())
+        .fontSize(SCREEN_SAVER_FONT.L4)
+        .fontColor(this.palette().textTertiary)
+        .maxLines(1)
+        .textShadow(this.textShadow())
+      Text(this.cityLine())
+        .fontSize(SCREEN_SAVER_FONT.L5)
+        .fontColor(this.palette().textSecondary)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textShadow(this.textShadow())
+      if (this.largeCanvas() && this.statsText().length > 0) {
+        Text(this.statsText())
+          .fontSize(SCREEN_SAVER_FONT.L6)
+          .fontColor(this.palette().textTertiary)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textShadow(this.textShadow())
+      }
+
+      // 明后天：整块左对齐，三列固定宽度上下对齐；不再绘制右下角背景天气图标。
+      Column({ space: 1 }) {
+        this.dayRow('明天', screenSaverWeatherViewModel.tomorrowHighC,
+          screenSaverWeatherViewModel.tomorrowLowC, screenSaverWeatherViewModel.tomorrowText)
+        this.dayRow('后天', screenSaverWeatherViewModel.dayAfterHighC,
+          screenSaverWeatherViewModel.dayAfterLowC, screenSaverWeatherViewModel.dayAfterText)
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ top: 1 })
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .alignItems(HorizontalAlign.Center)
   }
 
   build() {
     Column() {
       if (this.hasData()) {
-        if (this.density() === 'minimal') {
-          this.minimalContent()
-        } else if (this.density() === 'compact') {
-          this.compactContent()
+        if (this.isOneByOne()) {
+          this.oneByOneContent()
+        } else if (this.narrowTall()) {
+          this.narrowTallContent()
+        } else if (this.wideFlat()) {
+          this.wideFlatContent()
         } else {
-          this.fullContent()
+          this.richContent()
         }
       } else {
         this.emptyHint()

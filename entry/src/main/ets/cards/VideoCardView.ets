@@ -34,6 +34,7 @@ import {
   screenSaverTextShadow,
   ScreensaverCardPalette
 } from '../common/CardTheme';
+import { SCREEN_SAVER_FONT } from '../common/CardTypography';
 import { screenSaverResolveDensity } from './CardCatalog';
 import { ScreensaverCardDensity, ScreensaverCardInstance, ScreensaverCardMode,
   ScreensaverInkTone } from '../model/ConfigModels';
@@ -336,18 +337,18 @@ export struct ScreensaverVideoCard {
         if (this.density() === 'minimal') {
           // 1×1 这类极小尺寸只留一行提示，保证「不是空白」且不溢出
           Text('无视频')
-            .fontSize(10)
+            .fontSize(SCREEN_SAVER_FONT.L6)
             .fontColor(this.palette().textTertiary)
             .textShadow(this.textShadow())
         } else {
           Column({ space: 4 }) {
             Text('未选择视频')
-              .fontSize(this.density() === 'compact' ? 11 : 13)
+              .fontSize(this.density() === 'compact' ? SCREEN_SAVER_FONT.L5 : SCREEN_SAVER_FONT.L4)
               .fontColor(this.palette().textSecondary)
               .textShadow(this.textShadow())
             if (this.density() === 'full') {
               Text('在配置中选择本地视频')
-                .fontSize(11)
+                .fontSize(SCREEN_SAVER_FONT.L5)
                 .fontColor(this.palette().textTertiary)
                 .textShadow(this.textShadow())
             }
@@ -360,12 +361,13 @@ export struct ScreensaverVideoCard {
       if (this.unavailable) {
         Column({ space: 6 }) {
           Text('视频不可用')
-            .fontSize(this.density() === 'minimal' ? 10 : (this.density() === 'compact' ? 11 : 13))
+            .fontSize(this.density() === 'minimal' ? SCREEN_SAVER_FONT.L6 :
+            (this.density() === 'compact' ? SCREEN_SAVER_FONT.L5 : SCREEN_SAVER_FONT.L4))
             .fontColor(this.palette().textSecondary)
             .textShadow(this.textShadow())
           if (this.density() === 'full') {
             Text('文件已被删除 · 请在配置中重新选择')
-              .fontSize(11)
+              .fontSize(SCREEN_SAVER_FONT.L5)
               .fontColor(this.palette().textTertiary)
               .textShadow(this.textShadow())
           }
@@ -373,7 +375,7 @@ export struct ScreensaverVideoCard {
           if (this.cardMode === 'edit' && this.density() === 'full') {
             Column() {
               Text('重选')
-                .fontSize(12)
+                .fontSize(SCREEN_SAVER_FONT.L5)
                 .fontColor('#4A9EFF')
             }
             .constraintSize({ minWidth: 40, minHeight: 40 })

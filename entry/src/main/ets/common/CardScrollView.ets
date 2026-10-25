@@ -34,6 +34,8 @@ export struct CardScrollView {
   @Param hintColor: string = '#F2F2F2';
   /** 数据层已知会溢出时的强制标记（测量在部分布局下只能拿到视口高度）。 */
   @Param forceOverflowHint: boolean = false;
+  /** 用户滚动回调（行情卡用于「滚动识别后不触发点击刷新」的手势仲裁）。 */
+  @Event onUserScroll: () => void = (): void => {};
   @BuilderParam content: () => void;
 
   private scroller: Scroller = new Scroller();
@@ -123,6 +125,7 @@ export struct CardScrollView {
       })
       .onDidScroll((): void => {
         if (this.scrollEnabled) {
+          this.onUserScroll();
           this.scheduleReset();
         }
       })

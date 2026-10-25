@@ -32,6 +32,7 @@
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { ScreenSaverLogger } from '../common/Logger';
+import { screenSaverRemoveEntryIcon } from '../common/EntryIconStore';
 import {
   SCREEN_SAVER_CARD_CATALOG,
   screenSaverCardTypeName,
@@ -51,12 +52,15 @@ import {
   SCREEN_SAVER_LANDSCAPE_GRID_ROWS,
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
   SCREEN_SAVER_QUOTES_MAX_SYMBOLS,
+  SCREEN_SAVER_QUOTES_MINUTE_MAX_POINTS,
   SCREEN_SAVER_SCHEMA_VERSION,
+  SCREEN_SAVER_ENTRY_DATA_VERSION,
   SCREEN_SAVER_TODO_DATA_VERSION,
   SCREEN_SAVER_TODO_MAX_ITEMS,
   SCREEN_SAVER_TODO_MAX_LEN,
   SCREEN_SAVER_DEFAULT_CANVAS_COLOR,
   screenSaverIsCanvasColor,
+  screenSaverClampGalleryTheme,
   ScreensaverCardInstance,
   ScreensaverCardMeta,
   ScreensaverCardType,
@@ -68,6 +72,8 @@ import {
   ScreensaverHolidayDay,
   ScreensaverHolidayYear,
   ScreensaverLayout,
+  ScreensaverMinuteData,
+  ScreensaverMinutePoint,
   ScreensaverQuote,
   ScreensaverQuotesData,
   ScreensaverRawCard,
@@ -81,6 +87,8 @@ import {
   ScreensaverRawHolidayDay,
   ScreensaverRawHolidayYear,
   ScreensaverRawLayout,
+  ScreensaverRawMinuteData,
+  ScreensaverRawMinutePoint,
   ScreensaverRawPage,
   ScreensaverRawPhoto,
   ScreensaverRawQuotes,
@@ -93,14 +101,17 @@ import {
   ScreensaverRawVideo,
   ScreensaverRawWeather,
   ScreensaverRawWeatherCache,
+  ScreensaverEntryTargetType,
   ScreensaverResizeResult,
   ScreensaverSettings,
+  ScreensaverTodoConfig,
   ScreensaverTodoItem,
   ScreensaverTradingCalendarData,
   ScreensaverWeatherData,
   ScreenSaverOrientation
 } from './ConfigModels';
 import { screenSaverNormalizeStoredQuotes } from './QuoteSymbols';
+import { screenSaverPresetAppById } from './EntryPresets';
 
 // ---------- 持久化键名（Preferences 里的 key） ----------
 const SCREEN_SAVER_STORE_NAME: string = 'screen_saver_store';       // 偏好数据库文件名
@@ -112,6 +123,7 @@ const SCREEN_SAVER_GIT_TOKEN_KEY: string = 'screen_saver_git_token';// GitHub �
 const SCREEN_SAVER_GIT_CACHE_KEY: string = 'screen_saver_git_cache';// Git 数据离线缓存
 const SCREEN_SAVER_WEATHER_CACHE_KEY: string = 'screen_saver_weather_cache'; // 天气数据离线缓存（需求 A）
 const SCREEN_SAVER_QUOTES_CACHE_KEY: string = 'screen_saver_quotes_cache';   // 行情卡离线缓存（按卡片 id）
+const SCREEN_SAVER_MINUTE_CACHE_KEY: string = 'screen_saver_minute_cache';   // 分时图缓存（按 query，跨日失效）
 const SCREEN_SAVER_HOLIDAY_CACHE_KEY: string = 'screen_saver_holiday_cache'; // 在线节假日缓存（按年份）
 const SCREEN_SAVER_TRADING_CALENDAR_KEY: string = 'screen_saver_trading_calendar'; // 交易日历缓存（12h）
 // 保存防抖间隔：停下来 200ms 才真正写盘。
@@ -184,6 +196,8 @@ export class ScreensaverAppModel {
   private pendingSaveModes: ScreenSaverOrientation[] = [];
   /** load() 是否已完成。 */
   private loaded: boolean = false;
+  /** 本次装载是否发生过待办 v1 → v2 迁移（迁移后需要落盘一次）。 */
+  private todoMigrationDirty: boolean = false;
   /** 等待加载完成的回调队列（加载完成前注册的界面刷新等任务）。 */
   private loadedCallbacks: Array<() => void> = [];
   /** 引导页是否已完成。 */
@@ -196,6 +210,8 @@ export class ScreensaverAppModel {
   private weatherCache: ScreensaverWeatherData | undefined = undefined;
   /** 行情卡缓存：cardId → 最近一次成功数据（离线显示用）。 */
   private quotesCache: Map<string, ScreensaverQuotesData> = new Map<string, ScreensaverQuotesData>();
+  /** 分时图缓存：query → 当日分时（跨日失效；最多保留 24 个标的）。 */
+  private minuteCache: Map<string, ScreensaverMinuteData> = new Map<string, ScreensaverMinuteData>();
   /** 在线节假日缓存：year → 该年数据（断网兜底）。 */
   private holidayCache: Map<string, ScreensaverHolidayYear> = new Map<string, ScreensaverHolidayYear>();
   /** 交易日历缓存：只存法定节假日日期键，12h 有效（5s 轮询期间不再请求日历）。 */
@@ -342,6 +358,7 @@ export class ScreensaverAppModel {
       if (store === undefined) {
         this.ensureDefaultLayout();
         this.initializeLandscapeFromPortrait();
+        this.linkSharedTodoLists();
         this.notifyLoaded();
         return;
       }
@@ -361,6 +378,10 @@ export class ScreensaverAppModel {
       const quotesCacheValue = await store.get(SCREEN_SAVER_QUOTES_CACHE_KEY, '');
       if (typeof quotesCacheValue === 'string' && quotesCacheValue.length > 0) {
         this.applyQuotesCacheText(quotesCacheValue);
+      }
+      const minuteCacheValue = await store.get(SCREEN_SAVER_MINUTE_CACHE_KEY, '');
+      if (typeof minuteCacheValue === 'string' && minuteCacheValue.length > 0) {
+        this.applyMinuteCacheText(minuteCacheValue);
       }
       const holidayCacheValue = await store.get(SCREEN_SAVER_HOLIDAY_CACHE_KEY, '');
       if (typeof holidayCacheValue === 'string' && holidayCacheValue.length > 0) {
@@ -396,10 +417,18 @@ export class ScreensaverAppModel {
         this.initializeLandscapeFromPortrait();
         landscapeInitialized = true;
       }
+      // 两个方向都装载完成后，按 listId 把同一张待办卡的配置对象绑到同一份数据：
+      // 竖屏勾选后横屏立即一致，换方向不会分裂状态。
+      this.linkSharedTodoLists();
       // 装载结束后回到竖屏（首页默认方向）。
       this.setActiveOrientation(ScreenSaverOrientation.Portrait);
       if (landscapeInitialized) {
         void this.persistLayoutForMode(ScreenSaverOrientation.Landscape);
+      }
+      // 旧待办数据（v1）迁移到 v2 后落盘一次；之后启动不再重复迁移。
+      if (this.todoMigrationDirty) {
+        this.todoMigrationDirty = false;
+        this.save();
       }
       this.notifyLoaded();
       ScreenSaverLogger.info(`layout loaded: portrait=${this.portraitLayout.cards.length} ` +
@@ -409,6 +438,7 @@ export class ScreensaverAppModel {
       ScreenSaverLogger.error(`layout load failed: ${error.message}`);
       this.ensureDefaultLayout();
       this.initializeLandscapeFromPortrait();
+      this.linkSharedTodoLists();
       this.setActiveOrientation(ScreenSaverOrientation.Portrait);
       this.notifyLoaded();
     }
@@ -532,7 +562,10 @@ export class ScreensaverAppModel {
       windKph: data.windKph,
       tomorrowHighC: data.tomorrowHighC,
       tomorrowLowC: data.tomorrowLowC,
-      tomorrowCode: data.tomorrowCode
+      tomorrowCode: data.tomorrowCode,
+      dayAfterHighC: data.dayAfterHighC,
+      dayAfterLowC: data.dayAfterLowC,
+      dayAfterCode: data.dayAfterCode
     };
     void this.persistFlag(SCREEN_SAVER_WEATHER_CACHE_KEY, JSON.stringify(raw));
   }
@@ -552,7 +585,10 @@ export class ScreensaverAppModel {
         windKph: raw.windKph ?? -1,
         tomorrowHighC: raw.tomorrowHighC ?? -999,
         tomorrowLowC: raw.tomorrowLowC ?? -999,
-        tomorrowCode: raw.tomorrowCode ?? -1
+        tomorrowCode: raw.tomorrowCode ?? -1,
+        dayAfterHighC: raw.dayAfterHighC ?? -999,
+        dayAfterLowC: raw.dayAfterLowC ?? -999,
+        dayAfterCode: raw.dayAfterCode ?? -1
       };
       return data;
     } catch (err) {
@@ -601,7 +637,8 @@ export class ScreensaverAppModel {
         cardId: key,
         quotes: rawQuotes,
         fetchedAt: value.fetchedAt,
-        sourceLabel: value.sourceLabel
+        sourceLabel: value.sourceLabel,
+        symbolsKey: value.symbolsKey ?? ''
       };
       rawList.push(raw);
     });
@@ -642,13 +679,100 @@ export class ScreensaverAppModel {
         const data: ScreensaverQuotesData = {
           quotes: quotes,
           fetchedAt: raw.fetchedAt ?? 0,
-          sourceLabel: raw.sourceLabel ?? '缓存'
+          sourceLabel: raw.sourceLabel ?? '缓存',
+          symbolsKey: raw.symbolsKey ?? ''
         };
         this.quotesCache.set(raw.cardId, data);
       }
     } catch (err) {
       const error = err as Error;
       ScreenSaverLogger.warn(`quotes cache parse failed: ${error.message}`);
+    }
+  }
+
+  // ---------- 分时图缓存（按 query；跨日失效；独立于 5s 价格轮询） ----------
+
+  getMinuteCache(query: string): ScreensaverMinuteData | undefined {
+    return this.minuteCache.get(query);
+  }
+
+  setMinuteCache(data: ScreensaverMinuteData): void {
+    if (data.query.length === 0 || data.date.length === 0 || data.prevClose <= 0) {
+      return;
+    }
+    if (this.minuteCache.size >= 24 && !this.minuteCache.has(data.query)) {
+      let oldestKey = '';
+      this.minuteCache.forEach((value: ScreensaverMinuteData, key: string): void => {
+        if (oldestKey.length === 0) {
+          oldestKey = key;
+        }
+      });
+      if (oldestKey.length > 0) {
+        this.minuteCache.delete(oldestKey);
+      }
+    }
+    this.minuteCache.set(data.query, data);
+    const rawList: ScreensaverRawMinuteData[] = [];
+    this.minuteCache.forEach((value: ScreensaverMinuteData, key: string): void => {
+      const rawPoints: ScreensaverRawMinutePoint[] = [];
+      for (const point of value.points) {
+        const rawPoint: ScreensaverRawMinutePoint = { minute: point.minute, price: point.price };
+        rawPoints.push(rawPoint);
+      }
+      const raw: ScreensaverRawMinuteData = {
+        query: key,
+        date: value.date,
+        prevClose: value.prevClose,
+        points: rawPoints,
+        fetchedAt: value.fetchedAt
+      };
+      rawList.push(raw);
+    });
+    void this.persistFlag(SCREEN_SAVER_MINUTE_CACHE_KEY, JSON.stringify(rawList));
+  }
+
+  /** 解析分时缓存；坏点跳过，但保留同一条里的其余有效点。 */
+  private applyMinuteCacheText(text: string): void {
+    try {
+      const rawList = JSON.parse(text) as ScreensaverRawMinuteData[];
+      for (const raw of rawList) {
+        const query = raw.query ?? '';
+        const date = raw.date ?? '';
+        const prevClose = raw.prevClose ?? 0;
+        if (query.length === 0 || date.length !== 8 || prevClose <= 0) {
+          continue;
+        }
+        const points: ScreensaverMinutePoint[] = [];
+        for (const rawPoint of raw.points ?? []) {
+          const minute = rawPoint.minute ?? '';
+          const price = rawPoint.price ?? 0;
+          if (minute.length !== 4 || !Number.isFinite(price) || price <= 0) {
+            continue;
+          }
+          const point: ScreensaverMinutePoint = { minute: minute, price: price };
+          points.push(point);
+          if (points.length >= SCREEN_SAVER_QUOTES_MINUTE_MAX_POINTS) {
+            break;
+          }
+        }
+        if (points.length < 2) {
+          continue;
+        }
+        const data: ScreensaverMinuteData = {
+          query: query,
+          date: date,
+          prevClose: prevClose,
+          points: points,
+          fetchedAt: raw.fetchedAt ?? 0
+        };
+        this.minuteCache.set(query, data);
+        if (this.minuteCache.size >= 24) {
+          break;
+        }
+      }
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`minute cache parse failed: ${error.message}`);
     }
   }
 
@@ -878,6 +1002,8 @@ export class ScreensaverAppModel {
       return;
     }
     this.applyCards(rawCards);
+    // 快照恢复会重建卡片对象：重新按 listId 绑定，避免待办数据跨方向分裂。
+    this.linkSharedTodoLists();
     this.save();
   }
 
@@ -885,6 +1011,11 @@ export class ScreensaverAppModel {
   removeCard(cardId: string): void {
     const index = this.layout.cards.findIndex((card: ScreensaverCardInstance): boolean => card.id === cardId);
     if (index >= 0) {
+      const removed = this.layout.cards[index];
+      // 入口卡删除时同步清理沙箱图标文件，避免孤儿文件越积越多。
+      if (removed.cardType === 'entry' && removed.entry.iconUri.length > 0) {
+        screenSaverRemoveEntryIcon(removed.entry.iconUri);
+      }
       this.layout.cards.splice(index, 1);
       this.layout.cardsRevision += 1;
       this.save();
@@ -1326,6 +1457,10 @@ export class ScreensaverAppModel {
     if (cardType === 'video') {
       card.video.playing = this.layout.settings.videoDefaultAutoplay;
     }
+    if (cardType === 'todo') {
+      // 新待办卡从创建起就带稳定 listId；横屏快照会复制它，从而共享同一份数据。
+      card.todo.listId = screenSaverGenerateId('todolist');
+    }
     return card;
   }
 
@@ -1456,6 +1591,79 @@ export class ScreensaverAppModel {
   }
 
   /**
+   * 待办数据跨方向共享（v2）。
+   *
+   * 背景：竖屏与横屏是两套独立布局，横屏快照会给卡片生成新的 card id；
+   * 若待办数据只挂在 card.todo 上，换方向后会出现两份副本，勾选状态分裂。
+   *
+   * 做法：每份待办配置带一个稳定的 listId（横屏快照会原样复制），装载完成后
+   * 把 listId 相同的卡片指向同一个 ScreensaverTodoConfig 对象。之后任一方向
+   * 勾选/取消/重排，另一个方向读到的都是同一份 items。
+   *
+   * 旧数据兼容：v1 没有 listId。非空列表用首条 item id 生成
+   * `todolist_legacy_<id>`（横屏克隆时会保留 item id，因此能自动配对）；
+   * 空列表用 `todolist_legacy_<cardId>`，再按待办卡出现顺序做一次保守配对。
+   * 已分叉的旧数据（两边 item id 不同）不强行合并，避免丢条目。
+   */
+  private linkSharedTodoLists(): void {
+    const shared: Map<string, ScreensaverTodoConfig> = new Map<string, ScreensaverTodoConfig>();
+    const portraitIds: Set<string> = new Set<string>();
+    const portraitTodo: ScreensaverCardInstance[] = [];
+    const landscapeTodo: ScreensaverCardInstance[] = [];
+    for (const card of this.portraitLayout.cards) {
+      if (card.cardType !== 'todo') {
+        continue;
+      }
+      portraitTodo.push(card);
+      this.linkTodoCard(card, shared);
+      portraitIds.add(card.todo.listId);
+    }
+    for (const card of this.landscapeLayout.cards) {
+      if (card.cardType !== 'todo') {
+        continue;
+      }
+      landscapeTodo.push(card);
+      this.linkTodoCard(card, shared);
+    }
+    // 兜底：v1 空列表没有可匹配的 item id。若两边都是「旧格式空列表」，
+    // 按出现顺序配对，避免用户在竖屏添加第一条后横屏仍是空列表。
+    const portraitEmpty: ScreensaverCardInstance[] = [];
+    for (const card of portraitTodo) {
+      if (card.todo.items.length === 0 && card.todo.listId.indexOf('todolist_legacy_') === 0) {
+        portraitEmpty.push(card);
+      }
+    }
+    const landscapeEmpty: ScreensaverCardInstance[] = [];
+    for (const card of landscapeTodo) {
+      if (card.todo.items.length === 0 && card.todo.listId.indexOf('todolist_legacy_') === 0 &&
+        !portraitIds.has(card.todo.listId)) {
+        landscapeEmpty.push(card);
+      }
+    }
+    const pairCount = Math.min(portraitEmpty.length, landscapeEmpty.length);
+    for (let index = 0; index < pairCount; index++) {
+      const source = portraitEmpty[index];
+      const target = landscapeEmpty[index];
+      target.todo = source.todo;
+      ScreenSaverLogger.info(`todo legacy empty list paired: ${source.todo.listId}`);
+    }
+  }
+
+  /** 单张待办卡绑定到共享配置（首次出现时登记，之后复用同一对象）。 */
+  private linkTodoCard(card: ScreensaverCardInstance,
+    shared: Map<string, ScreensaverTodoConfig>): void {
+    if (card.todo.listId.length === 0) {
+      card.todo.listId = screenSaverGenerateId('todolist');
+    }
+    const existing = shared.get(card.todo.listId);
+    if (existing !== undefined) {
+      card.todo = existing;
+      return;
+    }
+    shared.set(card.todo.listId, card.todo);
+  }
+
+  /**
    * 时钟卡的小尺寸显示规则（旧实现）说明：
    * 过去在 1×2 这类小尺寸下会直接把 clock.format 改写成 'timeOnly'，
    * 属于「静默改用户配置」。现在改由尺寸矩阵的密度变体在渲染层降级
@@ -1535,6 +1743,9 @@ export class ScreensaverAppModel {
     settings.keepScreenOn = rawSettings.keepScreenOn ?? true;
     settings.motionDisabled = rawSettings.motionDisabled ?? false;
     settings.lowBatteryAutoExit = rawSettings.lowBatteryAutoExit ?? true;
+    // 固定锁屏（本轮）：开关默认关闭；主题索引夹取到 0..3，脏数据回退水墨。
+    settings.gestureLockEnabled = rawSettings.gestureLockEnabled ?? false;
+    settings.galleryThemeIndex = screenSaverClampGalleryTheme(rawSettings.galleryThemeIndex ?? 0);
     // 屏保背景（变更项 7）：色值必须在预设白名单里（磁盘数据不可信），
     // 图片 uri 只做长度校验，模糊开关取布尔。
     const rawColor = rawSettings.canvasColor;
@@ -1799,9 +2010,73 @@ export class ScreensaverAppModel {
     if (rawEntry === undefined) {
       return;
     }
-    card.entry.displayName = rawEntry.displayName ?? '';
-    card.entry.link = rawEntry.link ?? '';
-    card.entry.subtitle = rawEntry.subtitle ?? '';
+    card.entry.version = SCREEN_SAVER_ENTRY_DATA_VERSION;
+    // v1 迁移：旧数据没有 targetType → 一律按自定义链接处理，link 原样保留。
+    card.entry.targetType = this.normalizeEntryTargetType(rawEntry.targetType);
+    card.entry.displayName = (rawEntry.displayName ?? '').trim();
+    card.entry.link = (rawEntry.link ?? '').trim();
+    card.entry.subtitle = (rawEntry.subtitle ?? '').trim();
+    card.entry.iconUri = rawEntry.iconUri ?? '';
+    card.entry.presetId = rawEntry.presetId ?? '';
+    card.entry.scheme = rawEntry.scheme ?? '';
+    card.entry.bundleName = rawEntry.bundleName ?? '';
+    card.entry.abilityName = rawEntry.abilityName ?? '';
+    card.entry.invalid = rawEntry.invalid ?? false;
+    const failureAt = rawEntry.lastFailureAt ?? 0;
+    card.entry.lastFailureAt = Number.isFinite(failureAt) && failureAt > 0 ? failureAt : 0;
+    const failureCount = rawEntry.failureCount ?? 0;
+    card.entry.failureCount = Number.isFinite(failureCount) && failureCount > 0 ?
+      Math.min(Math.round(failureCount), 9999) : 0;
+    if (card.entry.targetType === 'url') {
+      // 自定义链接不使用预设字段，避免脏数据串到别的分支。
+      card.entry.presetId = '';
+      card.entry.scheme = '';
+      card.entry.bundleName = '';
+      card.entry.abilityName = '';
+      return;
+    }
+    const preset = screenSaverPresetAppById(card.entry.presetId);
+    if (preset === undefined) {
+      // 预设被移除 / 数据损坏：保留配置但标记失效，等待用户重选。
+      card.entry.invalid = true;
+      return;
+    }
+    const kindMismatch = preset.kind !== card.entry.targetType;
+    if (kindMismatch) {
+      card.entry.invalid = true;
+    }
+    // 旧版本写入的错误启动参数会导致「必然拉起失败」。读取时一旦发现参数过期，
+    // 纠正参数并清掉旧失效标记，避免用户升级后仍看到「应用不可用」。
+    const launchParamsStale = card.entry.scheme !== preset.scheme ||
+      card.entry.bundleName !== preset.bundleName ||
+      card.entry.abilityName !== preset.abilityName;
+    if (launchParamsStale && !kindMismatch) {
+      card.entry.invalid = false;
+      card.entry.lastFailureAt = 0;
+      card.entry.failureCount = 0;
+    }
+    if (card.entry.displayName.length === 0) {
+      card.entry.displayName = preset.name;
+    }
+    if (card.entry.subtitle.length === 0) {
+      card.entry.subtitle = preset.subtitle;
+    }
+    // 预设启动参数以代码清单为准：旧版本写进卡片的错误 scheme / abilityName
+    // 必须在读取时纠正，否则用户升级后仍会拉起失败。
+    card.entry.scheme = preset.scheme;
+    card.entry.bundleName = preset.bundleName;
+    card.entry.abilityName = preset.abilityName;
+  }
+
+  /** 目标类型消毒：未知值一律回退 url（保证历史数据与损坏数据可用）。 */
+  private normalizeEntryTargetType(value: string | undefined): ScreensaverEntryTargetType {
+    if (value === 'thirdparty') {
+      return 'thirdparty';
+    }
+    if (value === 'system') {
+      return 'system';
+    }
+    return 'url';
   }
 
   /**
@@ -1820,6 +2095,7 @@ export class ScreensaverAppModel {
       card.quotes.colorScheme = rawQuotes.colorScheme;
     }
     card.quotes.offlineCache = rawQuotes.offlineCache ?? true;
+    card.quotes.showMinuteChart = rawQuotes.showMinuteChart ?? true;
   }
 
   /** Raw 倒计时配置 → 严格配置。来源只认 auto/online/custom；自定义日期必须合法。 */
@@ -1853,28 +2129,89 @@ export class ScreensaverAppModel {
     card.countdown.customItems = items;
   }
 
-  /** Raw 待办配置 → 严格配置。version 固定写当前版本；文本裁剪到 60 字；最多 100 条。 */
+  /**
+   * Raw 待办配置 → 严格配置。
+   *
+   * v1 → v2 迁移（不会丢任何旧待办）：
+   *   · 旧字段 done → completed（新字段 completed 优先，便于未来回滚兼容）；
+   *   · orderIndex 缺失 → 用原始数组下标；
+   *   · completedAt 缺失 → 用下标 + 1 作为迁移哨兵，让旧已完成项保持原有相对顺序；
+   *   · listId 缺失 → 非空列表用首条 item id 生成稳定签名，空列表用 card id。
+   * 文本仍裁剪到 60 字、最多 100 条；version 固定写当前版本。
+   */
   private applyRawTodo(card: ScreensaverCardInstance, rawTodo: ScreensaverRawTodo | undefined): void {
-    if (rawTodo === undefined) {
+    if (card.cardType !== 'todo') {
       return;
     }
+    if (rawTodo === undefined) {
+      // 理论上不会发生（待办卡一定有 todo 配置）；给一个稳定 listId 兜底。
+      if (card.todo.listId.length === 0) {
+        card.todo.listId = `todolist_legacy_${card.id}`;
+      }
+      return;
+    }
+    let migrated = rawTodo.version !== SCREEN_SAVER_TODO_DATA_VERSION ||
+      rawTodo.listId === undefined || rawTodo.listId.length === 0;
     const items: ScreensaverTodoItem[] = [];
+    let rawIndex = 0;
     for (const rawItem of rawTodo.items ?? []) {
       const text = (rawItem.text ?? '').trim();
       if (text.length === 0) {
+        rawIndex++;
         continue;
       }
       const item = new ScreensaverTodoItem();
       item.id = (rawItem.id !== undefined && rawItem.id.length > 0) ? rawItem.id : screenSaverGenerateId('todo');
       item.text = text.length > SCREEN_SAVER_TODO_MAX_LEN ? text.substring(0, SCREEN_SAVER_TODO_MAX_LEN) : text;
-      item.done = rawItem.done ?? false;
+      const rawOrder = rawItem.orderIndex;
+      item.orderIndex = (typeof rawOrder === 'number' && Number.isFinite(rawOrder)) ? rawOrder : rawIndex;
+      const completed = rawItem.completed !== undefined ? rawItem.completed : (rawItem.done ?? false);
+      item.completed = completed;
+      if (completed) {
+        const rawCompletedAt = rawItem.completedAt;
+        item.completedAt = (typeof rawCompletedAt === 'number' && Number.isFinite(rawCompletedAt) &&
+          rawCompletedAt > 0) ? rawCompletedAt : rawIndex + 1;
+      } else {
+        item.completedAt = null;
+      }
+      // done 是 v2 写盘时的兼容镜像，不能单独作为“需要迁移”的依据；
+      // completed 缺失才是真正的 v1 数据。
+      if (rawItem.orderIndex === undefined || rawItem.completed === undefined ||
+        (completed && rawItem.completedAt === undefined)) {
+        migrated = true;
+      }
       items.push(item);
+      rawIndex++;
       if (items.length >= SCREEN_SAVER_TODO_MAX_ITEMS) {
         break;
       }
     }
+    // orderIndex 可能是旧数据/外部改坏的重复值：按它稳定排序后重新编号，
+    // 保证展示层永远有确定的顺序；已完成项仍留在原数组位置（不提前移动）。
+    items.sort((a: ScreensaverTodoItem, b: ScreensaverTodoItem): number => {
+      if (a.orderIndex !== b.orderIndex) {
+        return a.orderIndex - b.orderIndex;
+      }
+      if (a.id === b.id) {
+        return 0;
+      }
+      return a.id < b.id ? -1 : 1;
+    });
+    let orderIndex = 0;
+    for (const item of items) {
+      item.orderIndex = orderIndex;
+      orderIndex++;
+    }
+    let listId = rawTodo.listId ?? '';
+    if (listId.length === 0) {
+      listId = items.length > 0 ? `todolist_legacy_${items[0].id}` : `todolist_legacy_${card.id}`;
+    }
     card.todo.version = SCREEN_SAVER_TODO_DATA_VERSION;
+    card.todo.listId = listId;
     card.todo.items = items;
+    if (migrated) {
+      this.todoMigrationDirty = true;
+    }
   }
 
   // =====================================================================
@@ -1898,6 +2235,8 @@ export class ScreensaverAppModel {
       keepScreenOn: settings.keepScreenOn,
       motionDisabled: settings.motionDisabled,
       lowBatteryAutoExit: settings.lowBatteryAutoExit,
+      gestureLockEnabled: settings.gestureLockEnabled,
+      galleryThemeIndex: settings.galleryThemeIndex,
       canvasColor: settings.canvasColor,
       canvasImageUri: settings.canvasImageUri,
       canvasBlur: settings.canvasBlur,
@@ -1967,14 +2306,25 @@ export class ScreensaverAppModel {
         unitCelsius: card.weather.unitCelsius
       };
       const rawEntry: ScreensaverRawEntry = {
+        version: SCREEN_SAVER_ENTRY_DATA_VERSION,
+        targetType: card.entry.targetType,
         displayName: card.entry.displayName,
         link: card.entry.link,
-        subtitle: card.entry.subtitle
+        subtitle: card.entry.subtitle,
+        iconUri: card.entry.iconUri,
+        presetId: card.entry.presetId,
+        scheme: card.entry.scheme,
+        bundleName: card.entry.bundleName,
+        abilityName: card.entry.abilityName,
+        invalid: card.entry.invalid,
+        lastFailureAt: card.entry.lastFailureAt,
+        failureCount: card.entry.failureCount
       };
       const rawQuotes: ScreensaverRawQuotes = {
         symbols: card.quotes.symbols,
         colorScheme: card.quotes.colorScheme,
-        offlineCache: card.quotes.offlineCache
+        offlineCache: card.quotes.offlineCache,
+        showMinuteChart: card.quotes.showMinuteChart
       };
       const rawCustomItems: ScreensaverRawCustomCountdown[] = [];
       for (const item of card.countdown.customItems) {
@@ -1995,12 +2345,17 @@ export class ScreensaverAppModel {
         const rawItem: ScreensaverRawTodoItem = {
           id: item.id,
           text: item.text,
-          done: item.done
+          orderIndex: item.orderIndex,
+          completed: item.completed,
+          completedAt: item.completedAt,
+          // v1 兼容镜像：旧版本只认 done；新版本读取时 completed 优先。
+          done: item.completed
         };
         rawTodoItems.push(rawItem);
       }
       const rawTodo: ScreensaverRawTodo = {
-        version: card.todo.version,
+        version: SCREEN_SAVER_TODO_DATA_VERSION,
+        listId: card.todo.listId,
         items: rawTodoItems
       };
       const rawCard: ScreensaverRawCard = {
@@ -2110,6 +2465,15 @@ export class ScreensaverAppModel {
       return card.weather.enabled ? `${card.weather.city} · 已开启` : `${card.weather.city} · 未开启`;
     }
     if (card.cardType === 'entry') {
+      if (card.entry.targetType !== 'url') {
+        if (card.entry.presetId.length === 0) {
+          return '未选择应用';
+        }
+        if (card.entry.invalid) {
+          return `${card.entry.displayName || '应用入口'} · 失效`;
+        }
+        return card.entry.displayName.length > 0 ? card.entry.displayName : '未选择应用';
+      }
       if (card.entry.displayName.length === 0) {
         return '未配置入口';
       }
@@ -2133,7 +2497,7 @@ export class ScreensaverAppModel {
     if (card.cardType === 'todo') {
       let done = 0;
       for (const item of card.todo.items) {
-        if (item.done) {
+        if (item.completed) {
           done++;
         }
       }

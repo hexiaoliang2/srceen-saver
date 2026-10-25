@@ -13,6 +13,7 @@ import { ScreensaverQuotesCard } from '../../cards/QuotesCardView';
 import { screenSaverSizePresets } from '../../cards/CardCatalog';
 import {
   SCREEN_SAVER_QUOTES_MAX_SYMBOLS,
+  screenSaverQuotesChartEligible,
   ScreensaverCardInstance,
   ScreensaverQuoteSymbol,
   ScreensaverSizePreset
@@ -364,6 +365,19 @@ export struct ScreenSaverQuotesSettingsPanel {
               screenSaverAppModel.save();
             }
           })
+
+          // 分时图开关：只在卡片严格大于 2×2 时出现；2×2 不显示分时图。
+          if (screenSaverQuotesChartEligible(this.card.colSpan, this.card.rowSpan)) {
+            ScreenSaverToggleRow({
+              label: '显示分时K线图',
+              tip: '仅大于 2×2 的卡片显示分时缩略图；关闭后恢复多标列表。2×2 及以下不显示。',
+              isOn: this.card.quotes.showMinuteChart,
+              onChange: (value: boolean): void => {
+                this.card.quotes.showMinuteChart = value;
+                screenSaverAppModel.save();
+              }
+            })
+          }
 
           // ---------- 刷新与状态 ----------
           Row({ space: 8 }) {

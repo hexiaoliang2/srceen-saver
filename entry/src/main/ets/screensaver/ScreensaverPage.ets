@@ -53,7 +53,8 @@ import {
 } from '../common/WindowController';
 import { screenSaverVibration } from '../common/VibrationHelper';
 import { screenSaverVideoThumb } from '../common/VideoThumb';
-import { screenSaverOpenLink, ScreenSaverLinkResult } from '../common/AppLinkLauncher';
+import { screenSaverOpenEntry, ScreenSaverLinkResult } from '../common/AppLinkLauncher';
+import { screenSaverRequestQuotesRefreshFor } from '../model/QuotesViewModel';
 import { ScreensaverCardHost } from '../cards/CardHost';
 import { screenSaverAppModel } from '../model/AppModel';
 import { screenSaverGitViewModel } from '../model/GitViewModel';
@@ -61,6 +62,8 @@ import { SCREEN_SAVER_COLORS, SCREEN_SAVER_METRICS } from '../common/ScreenSaver
 import { screenSaverCardPalette, screenSaverCurrentCardSkin, ScreensaverCardPalette,
   ScreensaverCardSkin } from '../common/CardTheme';
 import { screenSaverCanvasBackground } from '../common/CanvasBackground';
+import { screenSaverLockGestureController } from '../common/LockGestureController';
+import { ScreensaverGallery } from './ScreensaverGallery';
 import {
   screenSaverGridMetrics,
   screenSaverRectOf,
@@ -109,6 +112,8 @@ import {
   ScreenSaverOrientation,
   SheetKind,
   ScreensaverCardInstance,
+  ScreensaverLockScreenMode,
+  screenSaverClampGalleryTheme,
   ScreensaverGridPos,
   ScreensaverInkTone
 } from '../model/ConfigModels';
@@ -200,6 +205,14 @@ export struct ScreenSaverPlayPage {
   @Local sheetKind: SheetKind = 'none';
   /** 设置面板对应的卡片 id。 */
   @Local sheetCardId: string = '';
+  /** 当前锁屏形态：cards = 卡片锁屏（默认），gallery = 固定主题锁屏。 */
+  @Local lockMode: ScreensaverLockScreenMode = 'cards';
+  /** 固定主题索引（与 settings.galleryThemeIndex 同步并持久化）。 */
+  @Local galleryThemeIndex: number = 0;
+  /** 模式切换的一次性淡入透明度（≤300ms，不做两套叠加）。 */
+  @Local modeSwitchOpacity: number = 1;
+  /** 模式切换动画期间丢弃重复触发。 */
+  private modeSwitching: boolean = false;
 
   // ============ 拖动状态 ============
   /** 正在拖动的卡片 id（'' = 没在拖）。 */
@@ -314,6 +327,11 @@ export struct ScreenSaverPlayPage {
    * 点击会在卡片与页面两层各派发一次，250ms 窗口内忽略页面那次。
    */
   private cardActionAtMs: number = 0;
+  private lastScreenTapMs: number = 0;
+  /** 最近一次长按时间：长按进入编辑后，松手补发的 click 不得触发行情刷新。 */
+  private longPressAtMs: number = 0;
+  /** 行情卡点击刷新限频：cardId → 最近一次发起时间（1s 内合并）。 */
+  private quotesTapAt: Map<string, number> = new Map<string, number>();
   /**
    * 最近一次打开方向设置页的时间戳：卡片级与页面级长按可能同时命中，
    * 800ms 内只允许 push 一次，避免叠两个设置页。
@@ -352,6 +370,10 @@ export struct ScreenSaverPlayPage {
   aboutToAppear(): void {
     // 方向由入口通过 @Param 带入；这里再同步一次，保证卡片读写命中正确布局。
     screenSaverAppModel.setActiveOrientation(this.mode);
+    // 固定锁屏模式不持久化：每次进入屏保都从卡片锁屏开始，避免被困住。
+    this.lockMode = 'cards';
+    this.galleryThemeIndex = screenSaverClampGalleryTheme(
+      screenSaverAppModel.layout.settings.galleryThemeIndex);
     const context = this.getUIContext().getHostContext();
     if (context !== undefined) {
       void screenSaverWindowController.enter(context, screenSaverAppModel.layout.settings.keepScreenOn,
@@ -393,12 +415,16 @@ export struct ScreenSaverPlayPage {
    */
   private onPageShown(): void {
     this.pageActive = true;
+    // 从「屏保设置」返回时同步固定锁屏主题；主题选择器已在设置页持久化。
+    this.galleryThemeIndex = screenSaverClampGalleryTheme(
+      screenSaverAppModel.layout.settings.galleryThemeIndex);
     this.startBurnInTimer();
     this.startBatteryWatch();
     screenSaverTicker.addAppStateListener(this.appStateListener);
     this.refreshCanvasBackground();
     this.refreshCardSkin();
     this.refreshSafeInsets();
+    this.syncLockGestureSubscription();
     ScreenSaverLogger.info(`screensaver page shown: ${this.mode}`);
   }
 
@@ -419,8 +445,82 @@ export struct ScreenSaverPlayPage {
     this.hideCapsule();
     this.stopBurnInTimer();
     this.stopBatteryWatch();
+    this.stopLockGestureSubscription('page hidden');
     screenSaverTicker.removeAppStateListener(this.appStateListener);
     ScreenSaverLogger.info('screensaver page hidden: timers stopped');
+  }
+
+  /**
+   * 遮盖切换订阅的唯一入口：仅在「屏保可见 + 展示态 + 开关开启」时订阅。
+   * 编辑态、设置面板、切后台、离开页面都必须解除。
+   */
+  private syncLockGestureSubscription(): void {
+    const settings = screenSaverAppModel.layout.settings;
+    const shouldRun = this.pageActive && !this.editMode && !this.sheetVisible &&
+      settings.gestureLockEnabled;
+    if (!shouldRun) {
+      this.stopLockGestureSubscription('not displaying');
+      return;
+    }
+    if (screenSaverLockGestureController.isRunning()) {
+      return;
+    }
+    const ok = screenSaverLockGestureController.start((): void => {
+      this.onCoverGestureTriggered();
+    });
+    if (!ok) {
+      // 订阅失败：关闭开关并落盘，避免每次进屏保都重试；原因由设置页展示。
+      settings.gestureLockEnabled = false;
+      screenSaverAppModel.save();
+      ScreenSaverLogger.warn(`lock gesture start failed: ${screenSaverLockGestureController.errorText}`);
+    }
+  }
+
+  private stopLockGestureSubscription(reason: string): void {
+    if (screenSaverLockGestureController.isRunning()) {
+      screenSaverLockGestureController.stop(reason);
+    }
+  }
+
+  /** 传感器上升沿回调：模式切换 + 一次性过渡。 */
+  private onCoverGestureTriggered(): void {
+    if (!this.pageActive || this.editMode || this.sheetVisible || this.modeSwitching) {
+      return;
+    }
+    this.switchLockMode(this.lockMode === 'cards' ? 'gallery' : 'cards');
+  }
+
+  /**
+   * 锁屏形态切换：整体替换内容区（不做两套叠加），只做一次 ≤300ms 的淡入。
+   * 切到 gallery 时卡片整体卸载，卡片自己的定时器/轮询在 aboutToDisappear 中停止；
+   * 切回 cards 时卡片重新挂载，按既有「进入屏保请求一次 + 交易时段 5s」恢复。
+   */
+  private switchLockMode(target: ScreensaverLockScreenMode): void {
+    if (this.modeSwitching || this.lockMode === target) {
+      return;
+    }
+    this.modeSwitching = true;
+    this.hideCapsule();
+    if (target === 'gallery') {
+      this.stopBurnInTimer();
+      this.galleryThemeIndex = screenSaverClampGalleryTheme(
+        screenSaverAppModel.layout.settings.galleryThemeIndex);
+    } else {
+      this.startBurnInTimer();
+    }
+    this.lockMode = target;
+    this.syncLockGestureSubscription();
+    this.modeSwitchOpacity = 0.2;
+    this.getUIContext().animateTo({
+      duration: 240,
+      curve: Curve.EaseOut
+    }, (): void => {
+      this.modeSwitchOpacity = 1;
+    });
+    setTimeout((): void => {
+      this.modeSwitching = false;
+    }, 260);
+    ScreenSaverLogger.info(`lock screen mode switched: ${target}`);
   }
 
   /**
@@ -470,6 +570,13 @@ export struct ScreenSaverPlayPage {
       this.refreshCanvasBackground();
       this.refreshCardSkin();
     }
+    this.syncLockGestureSubscription();
+  }
+
+  /** 编辑态/设置面板会打断「屏保展示态」，立即解除传感器订阅。 */
+  @Monitor('editMode', 'sheetVisible')
+  onLockGestureContextChanged(): void {
+    this.syncLockGestureSubscription();
   }
 
   /**
@@ -872,6 +979,15 @@ export struct ScreenSaverPlayPage {
    * 因为点击会在卡片与页面两层各派发一次。
    */
   private handleScreenTap(): void {
+    // 固定屏保互动已全部注释：gallery 展示态不响应任何屏幕点击（不唤胶囊、不触发特效）
+    if (this.lockMode === 'gallery') {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastScreenTapMs < 240) {
+      return;
+    }
+    this.lastScreenTapMs = now;
     ScreenSaverLogger.info(`screen tap, editMode=${this.editMode}, capsule=${this.capsuleVisible}`);
     if (this.editMode) {
       return;
@@ -907,6 +1023,18 @@ export struct ScreenSaverPlayPage {
       this.jumpFromEntryCard(card);
       return;
     }
+    if (card.cardType === 'quotes') {
+      // §3.2 白名单例外：仅行情卡允许屏保态点击刷新，不得推广到其它卡片。
+      this.handleQuotesCardTap(card);
+      return;
+    }
+    if (card.cardType === 'todo') {
+      // 待办卡：只有行首圆可点（圆自身 stopPropagation）。
+      // 卡片其他位置 / 行文字 / 空白一律无动作；吃掉这次点击，避免顺带唤出退出胶囊。
+      this.cardActionAtMs = Date.now();
+      ScreenSaverLogger.info('todo card tap ignored: only check circle is interactive');
+      return;
+    }
     // 其它卡片没有卡片级动作：走原来的「唤胶囊」路径
     ScreenSaverLogger.info(`play-mode card tap: pass through ${card.cardType}`);
     this.handleScreenTap();
@@ -931,29 +1059,79 @@ export struct ScreenSaverPlayPage {
   }
 
   /**
-   * 屏保态点跳转卡：按卡片里用户填写的链接发起跳转（与编辑态「打开」按钮
-   * 共用同一个 AppLinkLauncher 实现）。
+   * 屏保态点跳转卡：整卡即热区，按卡片配置的目标类型发起跳转。
    *
-   * 变更项 6：屏保展示态**不弹失败提示**（未安装目标应用 / 链接不可用都只记日志），
-   * 保持屏保态的纯净规则；编辑态的操作反馈由卡片内「打开」按钮负责。
+   * - url：按用户填写的链接打开（历史行为不变）；
+   * - thirdparty / system：目标失效时保留配置并持久化失效态，提示重新选择；
+   * - 拉起重试成功后自动清除失效标记。
    */
   private jumpFromEntryCard(card: ScreensaverCardInstance): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined;
     if (context === undefined) {
       ScreenSaverLogger.warn('play-mode entry tap: no ability context');
+      this.toast('无法获取应用上下文，跳转未发起');
       return;
     }
-    const link = card.entry.link.trim();
-    if (link.length === 0) {
-      ScreenSaverLogger.info('play-mode entry tap: link not configured');
-      return;
-    }
-    ScreenSaverLogger.info(`play-mode entry tap: ${link}`);
-    screenSaverOpenLink(context, link).then((result: ScreenSaverLinkResult): void => {
-      if (!result.ok) {
-        ScreenSaverLogger.warn(`play-mode entry open failed: ${result.reason}`);
+    if (card.entry.targetType === 'url') {
+      const link = card.entry.link.trim();
+      if (link.length === 0) {
+        ScreenSaverLogger.info('play-mode entry tap: link not configured');
+        this.toast('未配置跳转链接');
+        return;
       }
+      ScreenSaverLogger.info(`play-mode entry tap: url ${link}`);
+    } else {
+      if (card.entry.presetId.length === 0) {
+        ScreenSaverLogger.info('play-mode entry tap: preset not selected');
+        this.toast('未选择目标应用：请在编辑模式设置里选择');
+        return;
+      }
+      ScreenSaverLogger.info(`play-mode entry tap: ${card.entry.targetType} ${card.entry.presetId}`);
+    }
+    screenSaverOpenEntry(context, card.entry).then((result: ScreenSaverLinkResult): void => {
+      if (result.ok) {
+        if (card.entry.targetType !== 'url' &&
+          (card.entry.invalid || card.entry.failureCount > 0 || card.entry.lastFailureAt > 0)) {
+          card.entry.invalid = false;
+          card.entry.lastFailureAt = 0;
+          card.entry.failureCount = 0;
+          screenSaverAppModel.save();
+        }
+        return;
+      }
+      if (card.entry.targetType !== 'url') {
+        card.entry.invalid = true;
+        card.entry.lastFailureAt = Date.now();
+        card.entry.failureCount = Math.min(card.entry.failureCount + 1, 9999);
+        screenSaverAppModel.save();
+      }
+      ScreenSaverLogger.warn(`play-mode entry open failed: ${result.reason}`);
+      this.toast(result.reason.length > 0 ? result.reason : '跳转失败');
     });
+  }
+
+  /**
+   * 屏保态点行情卡（§3.2 唯一白名单例外）：
+   *   · 长按 600ms 进入编辑/设置的补发 click：忽略；
+   *   · 1s 内多次点击同一张卡：合并为一次，只发一次请求；
+   *   · 实际刷新与成功/失败反馈由卡片自身的独立刷新通道完成。
+   */
+  private handleQuotesCardTap(card: ScreensaverCardInstance): void {
+    // 无论是否真正发起请求，都吃掉这次点击，避免同时唤出退出胶囊。
+    this.cardActionAtMs = Date.now();
+    if (Date.now() - this.longPressAtMs < 600) {
+      ScreenSaverLogger.info('quotes tap skipped: long press gesture');
+      return;
+    }
+    const now = Date.now();
+    const last = this.quotesTapAt.get(card.id);
+    if (last !== undefined && now - last < 1000) {
+      ScreenSaverLogger.info(`quotes tap merged: ${card.id}`);
+      return;
+    }
+    this.quotesTapAt.set(card.id, now);
+    ScreenSaverLogger.info(`quotes tap refresh: ${card.id}`);
+    screenSaverRequestQuotesRefreshFor(card.id);
   }
 
   /**
@@ -1065,11 +1243,6 @@ export struct ScreenSaverPlayPage {
         }
       }
     });
-  }
-
-  /** 跳转卡片库页面（编辑态点「＋ 添加卡片」）。 */
-  private addCardViaLibrary(): void {
-    this.navStack.pushPathByName('library', '');
   }
 
   // ==================== 拖动（移动卡片）====================
@@ -1480,7 +1653,7 @@ export struct ScreenSaverPlayPage {
         x: this.burnInX(this.fallbackCard),
         y: this.burnInY(this.fallbackCard)
       })
-      Text('长按进入编辑模式 · 再点「＋ 添加卡片」')
+      Text('长按进入编辑模式 · 进「屏保设置」添加卡片')
         .fontSize(12)
         .fontColor(SCREEN_SAVER_COLORS.textSecondary)
         .padding({ left: 14, right: 14, top: 7, bottom: 7 })
@@ -1585,8 +1758,8 @@ export struct ScreenSaverPlayPage {
   }
 
   /**
-   * 编辑态底栏：「＋ 添加卡片」（跳卡片库）+「卡片设置」（作用于当前选中卡片）
-   * + 操作提示文案。
+   * 编辑态底栏：「屏保设置」+「卡片设置」（作用于当前选中卡片）。
+   * 添加卡片统一收口到「屏保设置」页，编辑页底栏不再重复提供入口。
    *
    * 「卡片设置」是缺陷 1 验收路径上的显式入口：面板内容始终来自
    * selectedCardId 对应的那张卡片，不依赖「卡片被点开」这一隐式动作。
@@ -1594,20 +1767,6 @@ export struct ScreenSaverPlayPage {
   @Builder
   editBottomBar() {
     Row({ space: 8 }) {
-      Column() {
-        Text('＋ 添加卡片')
-          .fontSize(13)
-          .fontColor(SCREEN_SAVER_COLORS.white)
-          .padding({ left: 18, right: 18, top: 7, bottom: 7 })
-          .borderRadius(16)
-          .backgroundColor(SCREEN_SAVER_COLORS.accent)
-      }
-      .constraintSize({ minHeight: 40 })
-      .justifyContent(FlexAlign.Center)
-      .alignItems(HorizontalAlign.Center)
-      .onClick((): void => {
-        this.addCardViaLibrary();
-      })
       // 方向设置页入口：卡片开关、内容设置、添加/删除都在那里统一管理。
       Column() {
         Text('屏保设置')
@@ -2012,6 +2171,7 @@ export struct ScreenSaverPlayPage {
     .gesture(
       LongPressGesture({ repeat: false, duration: SCREEN_SAVER_METRICS.longPressMs })
         .onAction((): void => {
+          this.longPressAtMs = Date.now();
           if (!this.editMode) {
             this.enterEditMode();
             this.selectCard(card.id);
@@ -2130,6 +2290,7 @@ export struct ScreenSaverPlayPage {
   build() {
     NavDestination() {
       Stack({ alignContent: Alignment.Top }) {
+        if (this.lockMode === 'cards') {
         // ---------- 背景层（变更项 7）：整体背景永远在卡片与悬浮时钟之下 ----------
         this.backgroundLayer()
 
@@ -2217,6 +2378,38 @@ export struct ScreenSaverPlayPage {
           .justifyContent(FlexAlign.SpaceBetween)
           .hitTestBehavior(HitTestMode.None)
           .zIndex(SCREEN_SAVER_EDIT_CHROME_Z)
+          // 调试入口：无传感器环境（模拟器）验证固定锁屏；仅编辑态可见。
+          Column() {
+            Text('调试：进入固定锁屏')
+              .fontSize(10)
+              .fontColor(SCREEN_SAVER_COLORS.textSecondary)
+              .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+              .borderRadius(12)
+              .backgroundColor('#66000000')
+              .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
+              .onClick((): void => {
+                this.exitEditMode(false);
+                this.switchLockMode('gallery');
+              })
+          }
+          .width('100%')
+          .height('100%')
+          .justifyContent(FlexAlign.End)
+          .alignItems(HorizontalAlign.Center)
+          .padding({ bottom: 84 })
+          .hitTestBehavior(HitTestMode.None)
+          .zIndex(SCREEN_SAVER_EDIT_CHROME_Z + 1)
+        }
+        } else {
+          // ---------- 固定主题锁屏（gallery）：整体替换内容区，不与卡片叠加 ----------
+          ScreensaverGallery({
+            themeIndex: this.galleryThemeIndex,
+            active: this.pageActive
+            // 固定屏保互动已全部注释：点击不再唤出胶囊 / 触发主题特效
+            // onScreenTap: (): void => {
+            //   this.handleScreenTap();
+            // }
+          })
         }
 
         // ---------- 胶囊层：退出屏保 ----------
@@ -2248,6 +2441,12 @@ export struct ScreenSaverPlayPage {
       .gesture(
         LongPressGesture({ repeat: false, duration: SCREEN_SAVER_METRICS.longPressMs })
           .onAction((): void => {
+            this.longPressAtMs = Date.now();
+            if (this.lockMode === 'gallery') {
+              // 固定屏保互动已全部注释：长按不再进入当前方向设置页
+              // this.openModeSettings();
+              return;
+            }
             if (!this.editMode) {
               this.enterEditMode();
             }
@@ -2256,8 +2455,8 @@ export struct ScreenSaverPlayPage {
       .onClick((): void => {
         this.handleScreenTap();
       })
-      // 进出场动画的透明度
-      .opacity(this.displayOpacity)
+      // 进出场动画 + 模式切换淡入的透明度（都只跑一次，静止态恒为 1）
+      .opacity(this.displayOpacity * this.modeSwitchOpacity)
       // 设置面板（编辑态双击卡片弹出）
       .bindSheet(this.sheetVisible, this.sheetContent(), {
         height: 452,

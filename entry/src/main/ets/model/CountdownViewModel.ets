@@ -73,9 +73,9 @@ export interface ScreensaverCountdownEntry {
   dateLabel: string;
   /** 休 / 班 / 空（自定义不标注）。 */
   tag: string;
-  /** 来源：online / custom。 */
+  /** 来源：online / weekend / custom。 */
   source: string;
-  /** 卡片上显示的极轻来源标识：在线 / 自定义。 */
+  /** 卡片上显示的极轻来源标识：在线 / 周末 / 自定义。 */
   sourceLabel: string;
 }
 
@@ -92,10 +92,14 @@ export interface ScreensaverCountdownView {
   targetDateLabel: string;
   daysLeft: number;
   isToday: boolean;
+  /** 下一假期是否为法定节假日（true 时卡片在天数后显示感叹号）；周末为 false。 */
+  isStatutory: boolean;
   entries: ScreensaverCountdownEntry[];
   errorText: string;
   sourceLabel: string;
   fetchedAt: number;
+  /** 空态的第二行说明（区分加载中/失败/下一年度未发布/已加载但无未来日期）。 */
+  emptyDetail: string;
 }
 
 /** holiday-cn 年度 JSON 的原始结构。 */
@@ -131,6 +135,12 @@ interface HolidayGroupDraft {
   isOffDay: boolean;
   startKey: string;
   endKey: string;
+}
+
+/** 在线数据里的休/班日期键集合：周末候选要避开法定假日与调休补班。 */
+interface HolidayKeySets {
+  rest: string[];
+  work: string[];
 }
 
 /** 把日期键转成可比较的数字（YYMMDD），用于排序。 */
@@ -246,7 +256,8 @@ export class ScreensaverHolidayStore {
   @Trace fetchedAt: number = 0;
   @Trace errorText: string = '';
   @Trace loading: boolean = false;
-  private inflight: boolean = false;
+  /** 共享在途请求：多张倒计时卡同时进入时都等同一个 Promise，避免后一张卡卡在 loading。 */
+  private inflightPromise: Promise<void> | undefined = undefined;
   /** 年末强制补拉次年数据的最近时刻：避免每次进屏保都重复打网络。 */
   private lastNextYearForceAt: number = 0;
 
@@ -411,10 +422,22 @@ export class ScreensaverHolidayStore {
    * - 当前年有未来日期 → 次年失败不影响。
    */
   async ensureCoverage(force: boolean): Promise<void> {
-    if (this.inflight) {
-      return;
+    // 多张倒计时卡同时挂载时共享同一个请求；后一张卡不再“立即 return 后刷新出 loading”。
+    if (this.inflightPromise !== undefined) {
+      return this.inflightPromise;
     }
-    this.inflight = true;
+    const task = this.doEnsureCoverage(force);
+    this.inflightPromise = task;
+    try {
+      await task;
+    } finally {
+      if (this.inflightPromise === task) {
+        this.inflightPromise = undefined;
+      }
+    }
+  }
+
+  private async doEnsureCoverage(force: boolean): Promise<void> {
     this.loading = true;
     this.errorText = '';
     this.state = 'loading';
@@ -461,9 +484,13 @@ export class ScreensaverHolidayStore {
         this.state = 'success';
         this.errorText = '';
       }
+    } catch (err) {
+      const error = err as Error;
+      ScreenSaverLogger.warn(`holiday coverage failed: ${error.message}`);
+      this.state = 'error';
+      this.errorText = '假期数据暂不可用';
     } finally {
       this.loading = false;
-      this.inflight = false;
     }
   }
 
@@ -540,6 +567,61 @@ function screenSaverHolidayGroupToEntry(group: HolidayGroupDraft, todayKey: stri
     sourceLabel: '在线'
   };
   return entry;
+}
+
+/** 汇总在线数据里的休/班日期键。 */
+function screenSaverCollectHolidayKeys(years: ScreensaverHolidayYear[]): HolidayKeySets {
+  const rest: string[] = [];
+  const work: string[] = [];
+  for (const year of years) {
+    for (const day of year.days) {
+      if (day.isOffDay) {
+        if (rest.indexOf(day.date) < 0) {
+          rest.push(day.date);
+        }
+      } else if (work.indexOf(day.date) < 0) {
+        work.push(day.date);
+      }
+    }
+  }
+  const sets: HolidayKeySets = { rest: rest, work: work };
+  return sets;
+}
+
+/**
+ * 最近的周末候选：
+ * - 周六/周日都算假期；今天如果是周末且不是调休补班，就是今天；
+ * - 若该周末日期已被在线法定假日覆盖（restKeys），跳过，交给在线条目
+ *   （这样法定假日即使落在周末，也按「法定」显示感叹号）；
+ * - 若该周末是调休补班（workKeys），跳过，继续找下一个休息日。
+ */
+function screenSaverBuildWeekendEntry(todayKey: string, keys: HolidayKeySets):
+  ScreensaverCountdownEntry | undefined {
+  for (let offset = 0; offset < 21; offset++) {
+    const key = screenSaverAddDays(todayKey, offset);
+    const date = screenSaverDateFromKey(key);
+    if (date === undefined) {
+      continue;
+    }
+    const dayOfWeek = date.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      continue;
+    }
+    if (keys.rest.indexOf(key) >= 0 || keys.work.indexOf(key) >= 0) {
+      continue;
+    }
+    const includeYear = key.substring(0, 4) !== todayKey.substring(0, 4);
+    const entry: ScreensaverCountdownEntry = {
+      title: dayOfWeek === 6 ? '周六' : '周日',
+      targetDateKey: key,
+      dateLabel: screenSaverMonthDayChineseLabel(key, includeYear),
+      tag: '休',
+      source: 'weekend',
+      sourceLabel: '周末'
+    };
+    return entry;
+  }
+  return undefined;
 }
 
 /** 在线节假日 → 条目列表。 */
@@ -637,17 +719,42 @@ export function screenSaverBuildCountdownViewForDate(config: ScreensaverCountdow
   const includeCustom = config.source === 'auto' || config.source === 'custom';
   const onlineEntries = includeOnline ? screenSaverBuildHolidayEntries(store.years, todayKey) : [];
   const customEntries = includeCustom ? screenSaverBuildCustomEntries(config, todayKey) : [];
-  const allEntries = screenSaverSortEntries(onlineEntries.concat(customEntries));
+  // 周末是本地日历事实：即使在线数据未加载/失败也参与“下一假期”竞争。
+  // 已被在线法定假日覆盖或调休补班的周末日期会在 screenSaverBuildWeekendEntry 中跳过。
+  const weekendEntries: ScreensaverCountdownEntry[] = [];
+  if (includeOnline) {
+    const weekendEntry = screenSaverBuildWeekendEntry(todayKey, screenSaverCollectHolidayKeys(store.years));
+    if (weekendEntry !== undefined) {
+      weekendEntries.push(weekendEntry);
+    }
+  }
+  const allEntries = screenSaverSortEntries(onlineEntries.concat(weekendEntries).concat(customEntries));
   if (allEntries.length === 0) {
     let state: ScreensaverCountdownState = 'empty';
     let errorText = '';
+    let emptyDetail = '';
     if (includeOnline && (store.state === 'idle' || store.state === 'loading')) {
       state = 'loading';
+      emptyDetail = '进入屏保时只请求一次，不阻塞首帧';
     } else if (includeOnline && store.state === 'error') {
       state = 'error';
       errorText = '假期数据暂不可用';
+      emptyDetail = '请检查网络后重试';
+    } else if (!includeOnline) {
+      state = 'empty';
+      emptyDetail = '在设置中添加名称与日期';
     } else {
       state = 'empty';
+      const nextYear = Number(todayKey.substring(0, 4)) + 1;
+      const nextYearData = store.years.find((item: ScreensaverHolidayYear): boolean =>
+      item.year === nextYear);
+      if (nextYearData === undefined || nextYearData.days.length === 0) {
+        // 当前年已无未来标记，且下一年度公告尚未发布：这是数据源的真实状态，
+        // 不是请求失败；明确告诉用户，避免误以为卡片坏了。
+        emptyDetail = `${nextYear} 年假期公告尚未发布；在线数据已加载`;
+      } else {
+        emptyDetail = '在线数据已加载，暂无未来标记日期';
+      }
     }
     const emptyView: ScreensaverCountdownView = {
       state: state,
@@ -655,10 +762,12 @@ export function screenSaverBuildCountdownViewForDate(config: ScreensaverCountdow
       targetDateLabel: '',
       daysLeft: 0,
       isToday: false,
+      isStatutory: false,
       entries: [],
       errorText: errorText,
       sourceLabel: '',
-      fetchedAt: store.fetchedAt
+      fetchedAt: store.fetchedAt,
+      emptyDetail: emptyDetail
     };
     return emptyView;
   }
@@ -667,24 +776,35 @@ export function screenSaverBuildCountdownViewForDate(config: ScreensaverCountdow
   const entries: ScreensaverCountdownEntry[] = [];
   let hasOnlineSelected = false;
   let hasCustomSelected = false;
+  let hasWeekendSelected = false;
+  // 法定节假日标记：只有在线数据里的“休”段才算；周末/自定义不算。
+  let isStatutory = false;
   for (const entry of allEntries) {
     if (entry.targetDateKey === targetDateKey) {
       entries.push(entry);
       if (entry.source === 'online') {
         hasOnlineSelected = true;
+        if (entry.tag === '休') {
+          isStatutory = true;
+        }
+      } else if (entry.source === 'weekend') {
+        hasWeekendSelected = true;
       } else {
         hasCustomSelected = true;
       }
     }
   }
-  let sourceLabel = '';
-  if (hasOnlineSelected && hasCustomSelected) {
-    sourceLabel = '在线 + 自定义';
-  } else if (hasOnlineSelected) {
-    sourceLabel = '在线';
-  } else if (hasCustomSelected) {
-    sourceLabel = '自定义';
+  const sourceParts: string[] = [];
+  if (hasOnlineSelected) {
+    sourceParts.push('在线');
   }
+  if (hasWeekendSelected) {
+    sourceParts.push('周末');
+  }
+  if (hasCustomSelected) {
+    sourceParts.push('自定义');
+  }
+  const sourceLabel = sourceParts.join(' + ');
   let state: ScreensaverCountdownState = 'success';
   if (hasOnlineSelected && store.state === 'offline') {
     state = 'offline';
@@ -695,10 +815,12 @@ export function screenSaverBuildCountdownViewForDate(config: ScreensaverCountdow
     targetDateLabel: entries[0].dateLabel,
     daysLeft: screenSaverDayDiff(todayKey, targetDateKey),
     isToday: screenSaverDayDiff(todayKey, targetDateKey) === 0,
+    isStatutory: isStatutory,
     entries: entries,
     errorText: '',
     sourceLabel: sourceLabel,
-    fetchedAt: store.fetchedAt
+    fetchedAt: store.fetchedAt,
+    emptyDetail: ''
   };
   return view;
 }
@@ -717,10 +839,12 @@ export function screenSaverEmptyCountdownView(): ScreensaverCountdownView {
     targetDateLabel: '',
     daysLeft: 0,
     isToday: false,
+    isStatutory: false,
     entries: [],
     errorText: '',
     sourceLabel: '',
-    fetchedAt: 0
+    fetchedAt: 0,
+    emptyDetail: ''
   };
   return empty;
 }
@@ -793,7 +917,9 @@ export function screenSaverLogCountdownSelfTest(): void {
     { label: '今天', todayKey: '2026-10-18', source: 'custom', items: [today] },
     { label: '已过期', todayKey: '2026-10-18', source: 'custom', items: [expired, next] },
     { label: '国庆在线', todayKey: '2026-09-30', source: 'online', items: [], years: [holidayYear] },
-    { label: '补班在线', todayKey: '2026-10-09', source: 'online', items: [], years: [holidayYear] }
+    { label: '补班在线', todayKey: '2026-10-09', source: 'online', items: [], years: [holidayYear] },
+    { label: '周末在线', todayKey: '2026-10-21', source: 'online', items: [], years: [holidayYear] },
+    { label: '假日周末', todayKey: '2026-10-01', source: 'online', items: [], years: [holidayYear] }
   ];
   ScreenSaverLogger.info('countdown self-test begin');
   for (const testCase of cases) {
@@ -814,8 +940,10 @@ export function screenSaverLogCountdownSelfTest(): void {
       title = view.entries[0].title;
       tag = view.entries[0].tag;
     }
+    const statutory = view.isStatutory ? 1 : 0;
     ScreenSaverLogger.info(`countdown self-test ${testCase.label} main=${main} title=${title} ` +
-      `date=${view.targetDateLabel} tag=${tag} state=${view.state}`);
+      `date=${view.targetDateLabel} tag=${tag} statutory=${statutory} source=${view.sourceLabel} ` +
+      `state=${view.state}`);
   }
   ScreenSaverLogger.info('countdown self-test end');
 }

@@ -29,7 +29,12 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { ScreenSaverLogger } from '../common/Logger';
 import {
   SCREEN_SAVER_QUOTES_MAX_SYMBOLS,
+  SCREEN_SAVER_QUOTES_MINUTE_MAX_POINTS,
+  SCREEN_SAVER_QUOTES_MINUTE_TIMEOUT_MS,
+  SCREEN_SAVER_QUOTES_MIN_REQUEST_MS,
   SCREEN_SAVER_QUOTES_TIMEOUT_MS,
+  ScreensaverMinuteData,
+  ScreensaverMinutePoint,
   ScreensaverQuote,
   ScreensaverQuoteSymbol,
   ScreensaverQuotesData
@@ -69,6 +74,15 @@ export interface ScreensaverQuoteParseResult {
   symbols: ScreensaverQuoteSymbol[];
   invalid: string[];
   overflow: boolean;
+}
+
+/** 标的签名：用于判断「当前数据是否属于当前配置」，阻止旧配置的数据回填。 */
+export function screenSaverQuotesSymbolsKey(symbols: ScreensaverQuoteSymbol[]): string {
+  const queries: string[] = [];
+  for (const symbol of symbols) {
+    queries.push(symbol.query);
+  }
+  return queries.join(',');
 }
 
 /** 腾讯返回的一行拆分后的字段容器（只保留用到的下标，避免 any）。 */
@@ -245,7 +259,8 @@ export class TencentQuotesProvider implements ScreensaverQuotesProvider {
       const data: ScreensaverQuotesData = {
         quotes: quotes,
         fetchedAt: Date.now(),
-        sourceLabel: this.providerLabel
+        sourceLabel: this.providerLabel,
+        symbolsKey: screenSaverQuotesSymbolsKey(symbols)
       };
       return data;
     } catch (err) {
@@ -261,6 +276,143 @@ export class TencentQuotesProvider implements ScreensaverQuotesProvider {
 /** 当前启用的行情源。换实现只改这一行，卡片 UI 不变。 */
 export const screenSaverQuotesProvider: ScreensaverQuotesProvider = new TencentQuotesProvider();
 
+// ============================================================================
+// 分时数据（腾讯 web.ifzq.gtimg.cn minute/query；UTF-8 JSON）
+// 已用真实请求实测（2026-10-24，sh600519）：
+//   data.sh600519.data.date = "20261023"
+//   data.sh600519.data.data = ["0930 1311.84 1049 137612016.00", ...]
+//   data.sh600519.qt.sh600519[4] = 昨收 1318.49
+// 与 5s 行情同为腾讯快照，昨收基准一致；不走 5s 轮询。
+// ============================================================================
+
+const SCREEN_SAVER_TENCENT_MINUTE_ENDPOINT: string =
+  'https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=';
+
+interface TencentMinuteInner {
+  date?: string;
+  data?: string[];
+}
+
+interface TencentMinuteStock {
+  data?: TencentMinuteInner;
+  qt?: Record<string, string[]>;
+}
+
+interface TencentMinuteResponse {
+  code?: number;
+  data?: Record<string, TencentMinuteStock>;
+}
+
+/** 本地日期键（YYYYMMDD），用于分时缓存跨日失效。 */
+export function screenSaverMinuteDateKey(date: Date = new Date()): string {
+  const year = date.getFullYear().toString();
+  const month = (date.getMonth() + 1).toString().padStart(2, '0');
+  const day = date.getDate().toString().padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+/** 缓存是否属于今天（跨日失效）。 */
+export function screenSaverMinuteIsToday(data: ScreensaverMinuteData): boolean {
+  return data.date === screenSaverMinuteDateKey();
+}
+
+/**
+ * 拉取当日分时。失败/字段不足返回 undefined（调用方显示占位，不画残缺图）。
+ * 编码：响应头 UTF-8；用 ArrayBuffer + UTF-8 解码，不使用 GBK。
+ */
+export async function screenSaverFetchMinute(query: string): Promise<ScreensaverMinuteData | undefined> {
+  if (query.length === 0) {
+    return undefined;
+  }
+  ScreenSaverLogger.info(`minute request ${query} at ${screenSaverMinuteDateKey()}`);
+  const request = http.createHttp();
+  try {
+    const response = await request.request(`${SCREEN_SAVER_TENCENT_MINUTE_ENDPOINT}${query}`, {
+      method: http.RequestMethod.GET,
+      connectTimeout: SCREEN_SAVER_QUOTES_MINUTE_TIMEOUT_MS,
+      readTimeout: SCREEN_SAVER_QUOTES_MINUTE_TIMEOUT_MS,
+      expectDataType: http.HttpDataType.ARRAY_BUFFER
+    });
+    if (response.responseCode !== 200) {
+      ScreenSaverLogger.warn(`minute http code=${response.responseCode}`);
+      return undefined;
+    }
+    const result = response.result;
+    if (!(result instanceof ArrayBuffer)) {
+      ScreenSaverLogger.warn('minute response is not ArrayBuffer');
+      return undefined;
+    }
+    const decoder = util.TextDecoder.create('utf-8');
+    const text = decoder.decodeToString(new Uint8Array(result));
+    const raw = JSON.parse(text) as TencentMinuteResponse;
+    const root = raw.data;
+    if (root === undefined) {
+      ScreenSaverLogger.warn('minute response missing data');
+      return undefined;
+    }
+    const stock = root[query];
+    if (stock === undefined || stock.data === undefined) {
+      ScreenSaverLogger.warn(`minute response missing stock ${query}`);
+      return undefined;
+    }
+    const date = stock.data.date ?? '';
+    if (date.length !== 8) {
+      ScreenSaverLogger.warn(`minute response bad date: ${date}`);
+      return undefined;
+    }
+    const qt = stock.qt?.[query];
+    let prevClose = 0;
+    if (qt !== undefined) {
+      prevClose = Number(qt[4]);
+      if (!Number.isFinite(prevClose) || prevClose <= 0) {
+        const latest = Number(qt[3]);
+        const change = Number(qt[31]);
+        if (Number.isFinite(latest) && Number.isFinite(change)) {
+          prevClose = latest - change;
+        }
+      }
+    }
+    if (!Number.isFinite(prevClose) || prevClose <= 0) {
+      ScreenSaverLogger.warn(`minute response bad prevClose: ${prevClose}`);
+      return undefined;
+    }
+    const points: ScreensaverMinutePoint[] = [];
+    for (const line of stock.data.data ?? []) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 2) {
+        continue;
+      }
+      const minute = parts[0];
+      const price = Number(parts[1]);
+      if (minute.length !== 4 || !Number.isFinite(price) || price <= 0) {
+        continue;
+      }
+      const point: ScreensaverMinutePoint = { minute: minute, price: price };
+      points.push(point);
+      if (points.length >= SCREEN_SAVER_QUOTES_MINUTE_MAX_POINTS) {
+        break;
+      }
+    }
+    if (points.length < 2) {
+      return undefined;
+    }
+    const data: ScreensaverMinuteData = {
+      query: query,
+      date: date,
+      prevClose: prevClose,
+      points: points,
+      fetchedAt: Date.now()
+    };
+    return data;
+  } catch (err) {
+    const error = err as BusinessError;
+    ScreenSaverLogger.warn(`minute fetch failed: code=${error.code} message=${error.message}`);
+    return undefined;
+  } finally {
+    request.destroy();
+  }
+}
+
 /**
  * 手动刷新信号：设置面板点“立即刷新”时递增 token，
  * 已挂载的行情卡监听 token 变化后强制刷新（不依赖修改标的数组）。
@@ -268,12 +420,21 @@ export const screenSaverQuotesProvider: ScreensaverQuotesProvider = new TencentQ
 @ObservedV2
 export class ScreensaverQuotesRefreshBus {
   @Trace token: number = 0;
+  /** 空串 = 所有行情卡；非空 = 只刷新指定卡片（屏保态点击刷新）。 */
+  @Trace cardId: string = '';
 }
 
 export const screenSaverQuotesRefreshBus: ScreensaverQuotesRefreshBus = new ScreensaverQuotesRefreshBus();
 
-/** 请求所有已挂载行情卡强制刷新。 */
+/** 请求所有已挂载行情卡强制刷新（设置面板保存/立即刷新）。 */
 export function screenSaverRequestQuotesRefresh(): void {
+  screenSaverQuotesRefreshBus.cardId = '';
+  screenSaverQuotesRefreshBus.token = screenSaverQuotesRefreshBus.token + 1;
+}
+
+/** 只刷新指定卡片（屏保态点击卡片；白名单例外，不得推广）。 */
+export function screenSaverRequestQuotesRefreshFor(cardId: string): void {
+  screenSaverQuotesRefreshBus.cardId = cardId;
   screenSaverQuotesRefreshBus.token = screenSaverQuotesRefreshBus.token + 1;
 }
 
@@ -319,16 +480,50 @@ export class ScreensaverQuotesCardModel {
   @Trace fetchedAt: number = 0;
   @Trace errorText: string = '';
   @Trace sourceLabel: string = '';
+  /** 当前展示数据对应的配置签名（symbols.join(',')）。 */
+  @Trace symbolSignature: string = '';
   private inflight: boolean = false;
   private lastAttemptMs: number = 0;
+  private lastSignature: string = '';
+  private pendingRefresh: boolean = false;
+  private pendingCardId: string = '';
+  private pendingSymbols: ScreensaverQuoteSymbol[] = [];
+  private pendingUseCache: boolean = true;
 
-  /** 用磁盘缓存注水（进入屏保先显示上次结果，不阻塞首帧）。 */
+  /**
+   * 配置同步（3.1 根因修复）：
+   * 配置签名变化时立刻丢弃旧标的的行情，避免「改了代码仍显示旧名称」；
+   * 返回是否发生变化，供视图决定是否强制刷新。
+   */
+  syncConfig(symbols: ScreensaverQuoteSymbol[]): boolean {
+    const next = screenSaverQuotesSymbolsKey(symbols);
+    if (next === this.symbolSignature) {
+      return false;
+    }
+    this.symbolSignature = next;
+    this.quotes = [];
+    this.fetchedAt = 0;
+    this.sourceLabel = '';
+    this.errorText = symbols.length === 0 ? '未添加自选标的' : '';
+    this.state = symbols.length === 0 ? 'error' : 'loading';
+    ScreenSaverLogger.info(`quotes config changed: ${next.length > 0 ? next : '(empty)'}`);
+    return true;
+  }
+
+  /** 用磁盘缓存注水；缓存必须属于当前配置签名，否则丢弃。 */
   hydrate(cardId: string): void {
     if (this.quotes.length > 0) {
       return;
     }
     const cache = screenSaverAppModel.getQuotesCache(cardId);
     if (cache === undefined || cache.quotes.length === 0) {
+      return;
+    }
+    const cacheKey = cache.symbolsKey ?? '';
+    if (cacheKey !== this.symbolSignature) {
+      // 旧缓存没有 symbolsKey（升级前写入）也不能拿来给当前配置注水，
+      // 否则「改了代码先闪回旧名称」会复现。
+      ScreenSaverLogger.info('quotes hydrate skipped: cache belongs to another/unknown symbol set');
       return;
     }
     this.quotes = cache.quotes;
@@ -343,16 +538,34 @@ export class ScreensaverQuotesCardModel {
     return this.inflight;
   }
 
+  /** 传入配置与当前展示数据是否不一致（设置页改动后的通知路径用）。 */
+  needsSync(symbols: ScreensaverQuoteSymbol[]): boolean {
+    return screenSaverQuotesSymbolsKey(symbols) !== this.symbolSignature;
+  }
+
+  /** 手动刷新是否已过 1s 源端限频窗口（屏保点击第二次及以后）。 */
+  canManualRefresh(): boolean {
+    if (this.inflight) {
+      return false;
+    }
+    return this.lastAttemptMs === 0 || Date.now() - this.lastAttemptMs >= SCREEN_SAVER_QUOTES_MIN_REQUEST_MS;
+  }
+
   /**
    * 拉取行情。
    * force=true 用于手动刷新/交易窗口轮询；false 用于进入屏保时的一次请求。
    * 失败时：有缓存 → offline 继续显示；无缓存 → error 空态。
    * 返回值：true=成功或安全跳过；false=本次请求失败（供轮询退避计数）。
+   *
+   * 关键修复（3.1）：请求发起时记录签名；响应回来时若配置已变，
+   * 直接丢弃，绝不把旧配置的数据写回界面；在途期间的新请求排队一次。
    */
   async refresh(cardId: string, symbols: ScreensaverQuoteSymbol[], useCache: boolean,
     force: boolean): Promise<boolean> {
-    if (this.inflight) {
-      return true;
+    const signature = screenSaverQuotesSymbolsKey(symbols);
+    const configChanged = signature !== this.symbolSignature;
+    if (configChanged) {
+      this.syncConfig(symbols);
     }
     if (symbols.length === 0) {
       if (this.quotes.length > 0) {
@@ -363,13 +576,27 @@ export class ScreensaverQuotesCardModel {
       this.errorText = '未添加自选标的';
       return false;
     }
+    // 在途：把最新配置排队一次，避免「新配置的请求被 in-flight 去重丢掉」。
+    if (this.inflight) {
+      this.pendingRefresh = true;
+      this.pendingCardId = cardId;
+      this.pendingSymbols = symbols;
+      this.pendingUseCache = useCache;
+      return true;
+    }
     // 进入屏保时可能同时触发 aboutToAppear 与 cardActive：1.5s 内合并成一次。
     const now = Date.now();
     if (!force && this.lastAttemptMs > 0 && now - this.lastAttemptMs < 1500) {
       return true;
     }
+    // 手动刷新也计入源端限频：同一配置 1s 内只发一次（配置变化不受此限）。
+    if (force && !configChanged && this.lastAttemptMs > 0 &&
+      now - this.lastAttemptMs < SCREEN_SAVER_QUOTES_MIN_REQUEST_MS && signature === this.lastSignature) {
+      return true;
+    }
     this.inflight = true;
     this.lastAttemptMs = now;
+    this.lastSignature = signature;
     this.errorText = '';
     if (this.quotes.length === 0) {
       this.state = 'loading';
@@ -377,26 +604,45 @@ export class ScreensaverQuotesCardModel {
     try {
       const data = await screenSaverQuotesProvider.fetch(symbols);
       if (data === undefined) {
-        this.applyFailure(cardId, useCache);
+        if (signature === this.symbolSignature) {
+          this.applyFailure(cardId, useCache);
+        }
+        return false;
+      }
+      // 响应回来时配置已变：丢弃旧数据（这就是「更新后又闪回旧值」的根因）。
+      if (signature !== this.symbolSignature) {
+        ScreenSaverLogger.info('quotes response discarded: config changed while in flight');
         return false;
       }
       this.quotes = data.quotes;
       this.fetchedAt = data.fetchedAt;
       this.sourceLabel = data.sourceLabel;
       this.state = 'success';
+      data.symbolsKey = signature;
       screenSaverAppModel.setQuotesCache(cardId, data);
       return true;
     } catch (err) {
       const error = err as BusinessError;
       ScreenSaverLogger.warn(`quotes refresh failed: code=${error.code}`);
-      this.applyFailure(cardId, useCache);
+      if (signature === this.symbolSignature) {
+        this.applyFailure(cardId, useCache);
+      }
       return false;
     } finally {
       this.inflight = false;
+      if (this.pendingRefresh) {
+        this.pendingRefresh = false;
+        const nextCardId = this.pendingCardId;
+        const nextSymbols = this.pendingSymbols;
+        const nextUseCache = this.pendingUseCache;
+        setTimeout((): void => {
+          void this.refresh(nextCardId, nextSymbols, nextUseCache, true);
+        }, 0);
+      }
     }
   }
 
-  /** 失败降级：缓存优先；没有缓存才进入 error。 */
+  /** 失败降级：缓存优先；没有缓存才进入 error。缓存也必须属于当前配置。 */
   private applyFailure(cardId: string, useCache: boolean): void {
     if (this.quotes.length > 0) {
       this.state = 'offline';
@@ -404,7 +650,9 @@ export class ScreensaverQuotesCardModel {
       return;
     }
     const cache = screenSaverAppModel.getQuotesCache(cardId);
-    if (useCache && cache !== undefined && cache.quotes.length > 0) {
+    const cacheKey = cache !== undefined ? (cache.symbolsKey ?? '') : '';
+    const cacheMatches = cacheKey === this.symbolSignature;
+    if (useCache && cache !== undefined && cache.quotes.length > 0 && cacheMatches) {
       this.quotes = cache.quotes;
       this.fetchedAt = cache.fetchedAt;
       this.sourceLabel = `缓存 · ${cache.sourceLabel}`;

@@ -162,6 +162,11 @@ export class ScreenSaverWeatherViewModel {
   @Trace tomorrowLowC: number = -999;
   @Trace tomorrowText: string = '';
   @Trace tomorrowCondition: ScreensaverWeatherCondition = 'unknown';
+  /** 今天+2（后天）：与今天/明天同一份 Open-Meteo 响应，不额外请求。 */
+  @Trace dayAfterHighC: number = -999;
+  @Trace dayAfterLowC: number = -999;
+  @Trace dayAfterText: string = '';
+  @Trace dayAfterCondition: ScreensaverWeatherCondition = 'unknown';
 
   /** 是否有请求正在进行（防并发）。 */
   private inflight: boolean = false;
@@ -180,9 +185,13 @@ export class ScreenSaverWeatherViewModel {
     this.windKph = data.windKph;
     this.tomorrowHighC = data.tomorrowHighC;
     this.tomorrowLowC = data.tomorrowLowC;
+    this.dayAfterHighC = data.dayAfterHighC;
+    this.dayAfterLowC = data.dayAfterLowC;
     this.condition = screenSaverWeatherConditionOf(this.weatherCodeOfDescription(data.description));
     this.tomorrowCondition = screenSaverWeatherConditionOf(data.tomorrowCode);
     this.tomorrowText = data.tomorrowCode >= 0 ? screenSaverWeatherText(data.tomorrowCode) : '';
+    this.dayAfterCondition = screenSaverWeatherConditionOf(data.dayAfterCode);
+    this.dayAfterText = data.dayAfterCode >= 0 ? screenSaverWeatherText(data.dayAfterCode) : '';
   }
 
   /**
@@ -313,7 +322,7 @@ export class ScreenSaverWeatherViewModel {
     | undefined> {
     const url = `${SCREEN_SAVER_WEATHER_FORECAST_ENDPOINT}?latitude=${latitude}&longitude=${longitude}` +
       '&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m' +
-      '&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto&forecast_days=2';
+      '&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto&forecast_days=3';
     const text = await this.httpGet(url);
     if (text.length === 0) {
       return undefined;
@@ -329,6 +338,9 @@ export class ScreenSaverWeatherViewModel {
       let tomorrowHigh = -999;
       let tomorrowLow = -999;
       let tomorrowCode = -1;
+      let dayAfterHigh = -999;
+      let dayAfterLow = -999;
+      let dayAfterCode = -1;
       const daily = raw.daily;
       if (daily !== undefined) {
         const maxList = daily.temperature_2m_max;
@@ -350,6 +362,16 @@ export class ScreenSaverWeatherViewModel {
         if (codeList !== undefined && codeList.length > 1) {
           tomorrowCode = codeList[1];
         }
+        // 今天+2：同一份 forecast_days=3 响应的第三个元素（不额外请求）。
+        if (maxList !== undefined && maxList.length > 2) {
+          dayAfterHigh = maxList[2];
+        }
+        if (minList !== undefined && minList.length > 2) {
+          dayAfterLow = minList[2];
+        }
+        if (codeList !== undefined && codeList.length > 2) {
+          dayAfterCode = codeList[2];
+        }
       }
       const data: ScreensaverWeatherData = {
         city: city,
@@ -363,7 +385,10 @@ export class ScreenSaverWeatherViewModel {
         windKph: current.wind_speed_10m !== undefined ? Math.round(current.wind_speed_10m) : -1,
         tomorrowHighC: tomorrowHigh > -900 ? Math.round(tomorrowHigh) : -999,
         tomorrowLowC: tomorrowLow > -900 ? Math.round(tomorrowLow) : -999,
-        tomorrowCode: tomorrowCode
+        tomorrowCode: tomorrowCode,
+        dayAfterHighC: dayAfterHigh > -900 ? Math.round(dayAfterHigh) : -999,
+        dayAfterLowC: dayAfterLow > -900 ? Math.round(dayAfterLow) : -999,
+        dayAfterCode: dayAfterCode
       };
       return data;
     } catch (err) {

@@ -59,6 +59,7 @@ export struct ScreenSaverTodoSettingsPanel {
     screenSaverTodoToggle(this.card.todo, itemId);
     this.card.todo.items = this.card.todo.items.slice();
     screenSaverAppModel.save();
+    void screenSaverAppModel.flush();
   }
 
   private removeItem(itemId: string): void {
@@ -97,18 +98,18 @@ export struct ScreenSaverTodoSettingsPanel {
   @Builder
   todoEditorRow(item: ScreensaverTodoItem) {
     Row({ space: 8 }) {
-      Toggle({ type: ToggleType.Checkbox, isOn: item.done })
+      Toggle({ type: ToggleType.Checkbox, isOn: item.completed })
         .selectedColor(SCREEN_SAVER_COLORS.accentStrong)
         .onChange((value: boolean): void => {
-          if (value !== item.done) {
+          if (value !== item.completed) {
             this.toggleItem(item.id);
           }
         })
       Text(item.text)
         .fontSize(13)
-        .fontColor(item.done ? SCREEN_SAVER_COLORS.textTertiary : SCREEN_SAVER_COLORS.textPrimary)
+        .fontColor(item.completed ? SCREEN_SAVER_COLORS.textTertiary : SCREEN_SAVER_COLORS.textPrimary)
         .decoration({
-          type: item.done ? TextDecorationType.LineThrough : TextDecorationType.None,
+          type: item.completed ? TextDecorationType.LineThrough : TextDecorationType.None,
           color: SCREEN_SAVER_COLORS.textTertiary
         })
         .maxLines(2)
@@ -235,14 +236,14 @@ export struct ScreenSaverTodoSettingsPanel {
                 this.clearDone();
               }
             })
-            Text('屏保态只读，勾选/排序仅在此面板')
+            Text('屏保态可点圆勾选；排序/删除在此面板')
               .fontSize(10)
               .fontColor(SCREEN_SAVER_COLORS.textTertiary)
               .layoutWeight(1)
           }
           .width('100%')
 
-          Text('零权限 · 仅本机存储 · 随卡片实例持久化（数据版本 v1）')
+          Text('零权限 · 仅本机存储 · 随卡片实例持久化（数据版本 v2）')
             .fontSize(11)
             .fontColor(SCREEN_SAVER_COLORS.textTertiary)
             .width('100%')

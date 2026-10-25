@@ -28,6 +28,7 @@
  */
 
 import { ScreenSaverLogger } from '../common/Logger';
+import { SCREEN_SAVER_FONT } from '../common/CardTypography';
 import { screenSaverRelativeTime } from '../common/DateFormats';
 import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
 import { screenSaverResolveDensity } from './CardCatalog';
@@ -335,6 +336,18 @@ export struct ScreensaverGitCard {
     void screenSaverGitViewModel.refresh(this.card.git.username, this.card.git.offlineCache);
   }
 
+  /** 极简档总提交数：位数越多字号越小，保证 1×1 不溢出。 */
+  private minimalTotalFont(): number {
+    const text = `${screenSaverGitViewModel.total}`;
+    if (text.length >= 5) {
+      return SCREEN_SAVER_FONT.L6;
+    }
+    if (text.length >= 4) {
+      return SCREEN_SAVER_FONT.L4;
+    }
+    return SCREEN_SAVER_FONT.L1;
+  }
+
   /**
    * 极简档（1×1/2×1/1×2/4×1）：热力图在这个尺寸下每个格子只有几个像素，
    * 完全不可辨认，因此降级为「总提交数 + 近 7 天迷你条」的数字摘要。
@@ -343,7 +356,7 @@ export struct ScreensaverGitCard {
   minimalBody() {
     Column({ space: 2 }) {
       Text(`${screenSaverGitViewModel.total}`)
-        .fontSize(16)
+        .fontSize(this.minimalTotalFont())
         .fontColor(this.palette().textPrimary)
         .maxLines(1)
         .textShadow(this.textShadow())
@@ -380,7 +393,7 @@ export struct ScreensaverGitCard {
       } else {
         Row() {
           Text('GitHub 贡献')
-            .fontSize(12)
+            .fontSize(SCREEN_SAVER_FONT.L5)
             .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textShadow(this.textShadow())
@@ -389,7 +402,7 @@ export struct ScreensaverGitCard {
             // 加载中：关动效时用文字，否则用系统转圈动画
             if (screenSaverMotionOff()) {
               Text('刷新中…')
-                .fontSize(10)
+                .fontSize(SCREEN_SAVER_FONT.L6)
                 .fontColor(this.palette().textTertiary)
                 .textShadow(this.textShadow())
             } else {
@@ -403,7 +416,7 @@ export struct ScreensaverGitCard {
             if (this.cardMode === 'edit') {
               Column() {
                 Text('重试')
-                  .fontSize(11)
+                  .fontSize(SCREEN_SAVER_FONT.L5)
                   .fontColor('#4A9EFF')
               }
               .constraintSize({ minWidth: 40, minHeight: 40 })
@@ -422,7 +435,7 @@ export struct ScreensaverGitCard {
           // 完全没有数据可显示：只显示错误文案
           Column({ space: 4 }) {
             Text(this.statusText())
-              .fontSize(11)
+              .fontSize(SCREEN_SAVER_FONT.L5)
               .fontColor(this.palette().textTertiary)
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -453,7 +466,7 @@ export struct ScreensaverGitCard {
 
         if (this.density() === 'full') {
           Text(this.footerText())
-            .fontSize(10)
+            .fontSize(SCREEN_SAVER_FONT.L6)
             .fontColor(this.palette().textTertiary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })

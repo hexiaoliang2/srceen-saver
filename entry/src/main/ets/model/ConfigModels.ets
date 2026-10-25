@@ -143,6 +143,20 @@ export const SCREEN_SAVER_QUOTES_RETRY_SECOND_MS: number = 30000;
 export const SCREEN_SAVER_QUOTES_MAX_RETRIES: number = 3;
 /** 交易日历缓存有效期（12 小时；5s 轮询期间不得再请求日历）。 */
 export const SCREEN_SAVER_TRADING_CALENDAR_CACHE_MS: number = 12 * 60 * 60 * 1000;
+/** 手动刷新/独立分时刷新的最小请求间隔（1 秒；屏保点击刷新据此合并）。 */
+export const SCREEN_SAVER_QUOTES_MIN_REQUEST_MS: number = 1000;
+/** 分时数据独立刷新间隔（≥60 秒；不得塞进 5s 价格轮询）。 */
+export const SCREEN_SAVER_QUOTES_MINUTE_INTERVAL_MS: number = 60000;
+/** 分时接口超时（8 秒）。 */
+export const SCREEN_SAVER_QUOTES_MINUTE_TIMEOUT_MS: number = 8000;
+/** A 股一个交易日最多 240 个分钟点；超出部分截断。 */
+export const SCREEN_SAVER_QUOTES_MINUTE_MAX_POINTS: number = 240;
+/** 自定义入口图标解码长边上限（px）：按最大档图标 122vp × 3 倍屏 ≈ 366px 取整。 */
+export const SCREEN_SAVER_ENTRY_ICON_MAX_PX: number = 384;
+/** 自定义入口图标文件大小上限（字节）：2MB。 */
+export const SCREEN_SAVER_ENTRY_ICON_MAX_BYTES: number = 2 * 1024 * 1024;
+/** 入口卡数据版本：1 = 只有自定义链接（旧），2 = 支持 url / thirdparty / system。 */
+export const SCREEN_SAVER_ENTRY_DATA_VERSION: number = 2;
 
 // ---------- 倒计时卡片相关（在线节假日 holiday-cn） ----------
 /** 当年数据用完后预取次年的触发天数（年末 14 天内追加一次请求）。 */
@@ -157,8 +171,13 @@ export const SCREEN_SAVER_COUNTDOWN_TIMEOUT_MS: number = 5000;
 export const SCREEN_SAVER_TODO_MAX_LEN: number = 60;
 /** 单张待办卡最多条目数（防止布局数据无限增长）。 */
 export const SCREEN_SAVER_TODO_MAX_ITEMS: number = 100;
-/** 待办数据版本（独立于布局 schemaVersion，便于以后迁移条目结构）。 */
-export const SCREEN_SAVER_TODO_DATA_VERSION: number = 1;
+/**
+ * 待办数据版本（独立于布局 schemaVersion，便于以后迁移条目结构）。
+ * v1：id / text / done；
+ * v2：新增 orderIndex / completed / completedAt / listId（v1 → v2 的迁移见
+ *     AppModel.applyRawTodo；旧 done 字段仍会被读取，不会丢数据）。
+ */
+export const SCREEN_SAVER_TODO_DATA_VERSION: number = 2;
 
 // ---------- 通用卡片滚动 ----------
 /** 屏保态卡片内滚动后，无操作自动回到顶部的延迟（10 秒）。 */
@@ -167,7 +186,7 @@ export const SCREEN_SAVER_CARD_SCROLL_RESET_MS: number = 10 * 1000;
 // ---------- 时钟字体 ----------
 export const SCREEN_SAVER_CLOCK_MIN_FONT: number = 12;   // 字号下限（vp）
 export const SCREEN_SAVER_CLOCK_MAX_FONT: number = 160;  // 字号上限
-export const SCREEN_SAVER_CLOCK_SMALL_FONT: number = 32; // 小于该值算「小字号」布局（日期换行等特殊处理）
+export const SCREEN_SAVER_CLOCK_SMALL_FONT: number = 36; // L0：卡片主数字下限（小卡受宽度约束时按实测收缩）
 
 // ---------- 通用选项结构 ----------
 /** 数字选项（如间隔档位）：实际值 + 显示文案。 */
@@ -393,17 +412,38 @@ export class ScreensaverWeatherConfig {
   @Trace unitCelsius: boolean = true;
 }
 
+/** 入口目标类型：自定义链接 / 第三方应用 / 系统应用。 */
+export type ScreensaverEntryTargetType = 'url' | 'thirdparty' | 'system';
+
 /**
  * 应用入口卡片配置（需求 A）。
  *
- * 只做「跳转」，不展示第三方内容、不内置任何第三方名称与链接与图标：
- * 名称与链接都由用户填写，代码与仓库里不预置商标/URL。
+ * url：名称与链接由用户填写；
+ * thirdparty / system：目标只能从内置预设清单里选（不手输包名/scheme）。
+ * 历史数据没有 targetType，读取时一律迁移为 url，链接原样保留。
  */
 @ObservedV2
 export class ScreensaverEntryConfig {
+  /** 数据版本（v2 起包含目标类型相关字段）。 */
+  @Trace version: number = SCREEN_SAVER_ENTRY_DATA_VERSION;
+  @Trace targetType: ScreensaverEntryTargetType = 'url';
   @Trace displayName: string = '';
+  /** url = 目标链接；system = 可选备用链接；thirdparty 不使用。 */
   @Trace link: string = '';
   @Trace subtitle: string = '';
+  /** 自定义图标（沙箱内 file:// 路径；空串 = 使用名称首字的中性图标）。 */
+  @Trace iconUri: string = '';
+  /** 预设应用 id（thirdparty / system 时有效）。 */
+  @Trace presetId: string = '';
+  /** 第三方应用拉起 scheme（canOpenLink 用）。 */
+  @Trace scheme: string = '';
+  /** 系统应用显式拉起参数。 */
+  @Trace bundleName: string = '';
+  @Trace abilityName: string = '';
+  /** 最近一次拉起失败：持久化失效态，卡片提示 + 设置页可重选。 */
+  @Trace invalid: boolean = false;
+  @Trace lastFailureAt: number = 0;
+  @Trace failureCount: number = 0;
 }
 
 /**
@@ -418,6 +458,16 @@ export class ScreensaverQuotesConfig {
   @Trace symbols: string[] = [];
   @Trace colorScheme: ScreensaverQuoteColorScheme = 'redUp';
   @Trace offlineCache: boolean = true;
+  /** 是否在屏保页显示分时缩略图（仅卡片严格大于 2×2 时生效）。 */
+  @Trace showMinuteChart: boolean = true;
+}
+
+/**
+ * 分时图可用尺寸：严格大于 2×2（面积 >4 且行列都不小于 2）。
+ * 2×2、4×1、1×4 等都不显示分时图。
+ */
+export function screenSaverQuotesChartEligible(colSpan: number, rowSpan: number): boolean {
+  return colSpan >= 2 && rowSpan >= 2 && colSpan * rowSpan > 4;
 }
 
 /** 行情涨跌配色：redUp = 红涨绿跌（默认）；greenUp = 绿涨红跌。 */
@@ -446,6 +496,38 @@ export interface ScreensaverQuotesData {
   quotes: ScreensaverQuote[];
   fetchedAt: number;
   sourceLabel: string;
+  /** 本次数据对应的标的签名（symbols.join(',')）；用于阻止旧配置的数据回填。 */
+  symbolsKey?: string;
+}
+
+/** 分时图单个分钟点（时间 HHMM + 该分钟价格）。 */
+export interface ScreensaverMinutePoint {
+  minute: string;
+  price: number;
+}
+
+/** 腾讯分时接口的一次解析结果（日期 + 昨收 + 分钟点）。 */
+export interface ScreensaverMinuteData {
+  query: string;
+  date: string;
+  prevClose: number;
+  points: ScreensaverMinutePoint[];
+  fetchedAt: number;
+}
+
+/** 分时缓存的原始结构（Preferences 内按 query 存一条）。 */
+export interface ScreensaverRawMinuteData {
+  query?: string;
+  date?: string;
+  prevClose?: number;
+  points?: ScreensaverRawMinutePoint[];
+  fetchedAt?: number;
+}
+
+/** 分时缓存单点的原始结构。 */
+export interface ScreensaverRawMinutePoint {
+  minute?: string;
+  price?: number;
 }
 
 /** 行情卡离线缓存的原始结构（Preferences 中按 cardId 存一条）。 */
@@ -454,6 +536,7 @@ export interface ScreensaverRawQuotesCache {
   quotes?: ScreensaverRawQuote[];
   fetchedAt?: number;
   sourceLabel?: string;
+  symbolsKey?: string;
 }
 
 /** 单条行情缓存的原始结构。 */
@@ -539,6 +622,11 @@ export interface ScreensaverRawTradingCalendar {
 @ObservedV2
 export class ScreensaverTodoConfig {
   @Trace version: number = SCREEN_SAVER_TODO_DATA_VERSION;
+  /**
+   * 待办列表身份：竖屏 / 横屏各自的卡片实例用它绑定到同一份数据，
+   * 避免换方向后完成状态与排序分裂。同一布局内不同卡片实例的 listId 不同。
+   */
+  @Trace listId: string = '';
   @Trace items: ScreensaverTodoItem[] = [];
 }
 
@@ -547,19 +635,29 @@ export class ScreensaverTodoConfig {
 export class ScreensaverTodoItem {
   @Trace id: string = '';
   @Trace text: string = '';
-  @Trace done: boolean = false;
+  /** 原始列表顺序（稳定排序键；新增/手动排序时重新编号）。 */
+  @Trace orderIndex: number = 0;
+  /** 是否已完成（v2 起替代 v1 的 done）。 */
+  @Trace completed: boolean = false;
+  /** 完成时间戳（毫秒）；未完成时为 null。排序键：升序，先完成的在上。 */
+  @Trace completedAt: number | null = null;
 }
 
 /** 待办卡原始结构。 */
 export interface ScreensaverRawTodo {
   version?: number;
+  listId?: string;
   items?: ScreensaverRawTodoItem[];
 }
 
-/** 单条待办原始结构。 */
+/** 单条待办原始结构（done 为 v1 兼容字段）。 */
 export interface ScreensaverRawTodoItem {
   id?: string;
   text?: string;
+  orderIndex?: number;
+  completed?: boolean;
+  completedAt?: number | null;
+  /** v1 兼容：旧版本只有 done，没有 completed / completedAt / orderIndex。 */
   done?: boolean;
 }
 
@@ -607,6 +705,31 @@ export class ScreensaverCardInstance {
   @Trace todo: ScreensaverTodoConfig = new ScreensaverTodoConfig();
 }
 
+/** 锁屏形态：卡片锁屏（默认）/ 固定主题锁屏。 */
+export type ScreensaverLockScreenMode = 'cards' | 'gallery';
+
+/** 固定主题锁屏的 4 套主题（顺序与设计稿一致，索引持久化）。 */
+export enum ScreensaverGalleryTheme {
+  Ink = 0,
+  Neon = 1,
+  Pixel = 2,
+  Greenhouse = 3
+}
+
+export const SCREEN_SAVER_GALLERY_THEME_COUNT: number = 4;
+
+/** 主题索引越界兜底：持久化脏数据/旧版本一律回到水墨山水。 */
+export function screenSaverClampGalleryTheme(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const index = Math.floor(value);
+  if (index < 0 || index >= SCREEN_SAVER_GALLERY_THEME_COUNT) {
+    return 0;
+  }
+  return index;
+}
+
 /** 全局设置（不隶属任何一张卡片）。 */
 @ObservedV2
 export class ScreensaverSettings {
@@ -618,6 +741,9 @@ export class ScreensaverSettings {
   @Trace keepScreenOn: boolean = true;        // 保持屏幕常亮
   @Trace motionDisabled: boolean = false;     // 关闭所有动画
   @Trace lowBatteryAutoExit: boolean = true;  // 低电量自动退出屏保
+  // ---------- 固定锁屏（本轮新增） ----------
+  @Trace gestureLockEnabled: boolean = false; // 遮盖切换锁屏开关（默认关闭）
+  @Trace galleryThemeIndex: number = 0;       // 当前固定主题索引（持久化）
   // ---------- 屏保整体背景（变更项 7） ----------
   @Trace canvasColor: string = '#000000';     // 背景色（默认纯黑；预设色见 CanvasBackground）
   @Trace canvasImageUri: string = '';         // 自选背景图片（空 = 只用色值）
@@ -700,9 +826,19 @@ export interface ScreensaverRawWeather {
 
 /** 应用入口配置的原始结构（需求 A）。 */
 export interface ScreensaverRawEntry {
+  version?: number;
+  targetType?: string;
   displayName?: string;
   link?: string;
   subtitle?: string;
+  iconUri?: string;
+  presetId?: string;
+  scheme?: string;
+  bundleName?: string;
+  abilityName?: string;
+  invalid?: boolean;
+  lastFailureAt?: number;
+  failureCount?: number;
 }
 
 /** 行情配置的原始结构（本次新增）。 */
@@ -710,6 +846,7 @@ export interface ScreensaverRawQuotes {
   symbols?: string[];
   colorScheme?: string;
   offlineCache?: boolean;
+  showMinuteChart?: boolean;
 }
 
 /** 倒计时配置的原始结构（本次新增）。 */
@@ -740,6 +877,9 @@ export interface ScreensaverWeatherData {
   tomorrowHighC: number;     // 明日最高温（℃），-999 = 无数据
   tomorrowLowC: number;      // 明日最低温（℃），-999 = 无数据
   tomorrowCode: number;      // 明日天气代码（WMO），-1 = 无数据
+  dayAfterHighC: number;     // 后天最高温（℃），-999 = 无数据
+  dayAfterLowC: number;      // 后天最低温（℃），-999 = 无数据
+  dayAfterCode: number;      // 后天天气代码（WMO），-1 = 无数据
 }
 
 /** 天气离线缓存的原始结构。 */
@@ -755,6 +895,9 @@ export interface ScreensaverRawWeatherCache {
   tomorrowHighC?: number;
   tomorrowLowC?: number;
   tomorrowCode?: number;
+  dayAfterHighC?: number;
+  dayAfterLowC?: number;
+  dayAfterCode?: number;
 }
 
 /** 单张卡片的原始结构。 */
@@ -791,6 +934,8 @@ export interface ScreensaverRawSettings {
   keepScreenOn?: boolean;
   motionDisabled?: boolean;
   lowBatteryAutoExit?: boolean;
+  gestureLockEnabled?: boolean;
+  galleryThemeIndex?: number;
   canvasColor?: string;
   canvasImageUri?: string;
   canvasBlur?: boolean;

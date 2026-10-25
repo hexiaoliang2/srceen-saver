@@ -14,6 +14,7 @@
  */
 
 import { ScreenSaverLogger } from '../common/Logger';
+import { SCREEN_SAVER_FONT } from '../common/CardTypography';
 import {
   screenSaverCardPalette,
   screenSaverTextShadow,
@@ -228,13 +229,25 @@ export struct ScreensaverCountdownCard {
     return this.palette().textTertiary;
   }
 
+  /**
+   * 1×1 天数主字号：1~2 位用 L2=24；3 位（如 100）降到 L5=14，
+   * 保证「还剩 + 3 位数字 + 天」在 90vp 窄卡内不溢出（§1.3 先不溢出）。
+   */
+  private countdownNumberFont(view: ScreensaverCountdownView): number {
+    if (!this.isOneByOne()) {
+      return SCREEN_SAVER_FONT.L0;
+    }
+    const daysText = screenSaverCountdownDaysText(view);
+    return daysText.length >= 3 ? SCREEN_SAVER_FONT.L5 : SCREEN_SAVER_FONT.L2;
+  }
+
   /** 固定天数主视觉：只出现一次，水平居中。 */
   @Builder
   countdownHeader(view: ScreensaverCountdownView) {
     Column({ space: 1 }) {
       if (view.isToday) {
         Text(screenSaverCountdownDaysText(view))
-          .fontSize(this.isOneByOne() ? 18 : 24)
+          .fontSize(SCREEN_SAVER_FONT.L0)
           .fontColor(this.palette().textPrimary)
           .fontWeight(FontWeight.Medium)
           .maxLines(1)
@@ -243,21 +256,29 @@ export struct ScreensaverCountdownCard {
       } else {
         Row({ space: 2 }) {
           Text(screenSaverCountdownPrefix(view))
-            .fontSize(this.isOneByOne() ? 9 : 11)
+            .fontSize(this.isOneByOne() ? SCREEN_SAVER_FONT.L7 : SCREEN_SAVER_FONT.L5)
             .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textShadow(this.textShadow())
           Text(screenSaverCountdownDaysText(view))
-            .fontSize(this.isOneByOne() ? 24 : 32)
+            .fontSize(this.countdownNumberFont(view))
             .fontColor(this.palette().textPrimary)
             .fontWeight(FontWeight.Medium)
             .maxLines(1)
             .textShadow(this.textShadow())
           Text(screenSaverCountdownSuffix(view))
-            .fontSize(this.isOneByOne() ? 9 : 11)
+            .fontSize(this.isOneByOne() ? SCREEN_SAVER_FONT.L7 : SCREEN_SAVER_FONT.L5)
             .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textShadow(this.textShadow())
+          if (view.isStatutory) {
+            Text('!')
+              .fontSize(this.isOneByOne() ? SCREEN_SAVER_FONT.L7 : SCREEN_SAVER_FONT.L5)
+              .fontColor(this.palette().restTag)
+              .fontWeight(FontWeight.Bold)
+              .maxLines(1)
+              .textShadow(this.textShadow())
+          }
         }
         .width('100%')
         .justifyContent(FlexAlign.Center)
@@ -274,7 +295,7 @@ export struct ScreensaverCountdownCard {
   entryRow(entry: ScreensaverCountdownEntry) {
     Column({ space: 1 }) {
       Text(entry.title)
-        .fontSize(this.isOneByOne() ? 10 : 12)
+        .fontSize(this.isOneByOne() ? SCREEN_SAVER_FONT.L6 : SCREEN_SAVER_FONT.L4)
         .fontColor(this.palette().textPrimary)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -283,13 +304,13 @@ export struct ScreensaverCountdownCard {
       if (!this.isOneByOne()) {
         Row({ space: 4 }) {
           Text(entry.dateLabel)
-            .fontSize(9)
+            .fontSize(SCREEN_SAVER_FONT.L6)
             .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textShadow(this.textShadow())
           if (entry.tag.length > 0) {
             Text(entry.tag)
-              .fontSize(8)
+              .fontSize(SCREEN_SAVER_FONT.L7)
               .fontColor(this.tagColor(entry))
               .padding({ left: 3, right: 3, top: 0, bottom: 0 })
               .borderRadius(3)
@@ -314,10 +335,13 @@ export struct ScreensaverCountdownCard {
     if (this.card.countdown.source === 'custom') {
       return '暂无自定义倒数日';
     }
-    return '暂无未来标记日期';
+    return '暂无未来假期';
   }
 
   private emptyDetail(view: ScreensaverCountdownView): string {
+    if (view.emptyDetail.length > 0) {
+      return view.emptyDetail;
+    }
     if (view.state === 'loading') {
       return '进入屏保时只请求一次，不阻塞首帧';
     }
@@ -327,7 +351,7 @@ export struct ScreensaverCountdownCard {
     if (this.card.countdown.source === 'custom') {
       return '在设置中添加名称与日期';
     }
-    return '在线数据已加载，可添加自定义倒数日';
+    return '在线数据已加载，暂无未来标记日期';
   }
 
   private emptyAction(view: ScreensaverCountdownView): string {
@@ -344,21 +368,21 @@ export struct ScreensaverCountdownCard {
   emptyHint(view: ScreensaverCountdownView) {
     Column({ space: 4 }) {
       Text(this.emptyTitle(view))
-        .fontSize(this.isOneByOne() ? 12 : 13)
+        .fontSize(this.isOneByOne() ? SCREEN_SAVER_FONT.L4 : SCREEN_SAVER_FONT.L5)
         .fontColor(this.palette().textPrimary)
         .fontWeight(FontWeight.Medium)
         .maxLines(2)
         .textAlign(TextAlign.Center)
         .textShadow(this.textShadow())
       Text(this.emptyDetail(view))
-        .fontSize(this.isOneByOne() ? 9 : 10)
+        .fontSize(this.isOneByOne() ? SCREEN_SAVER_FONT.L7 : SCREEN_SAVER_FONT.L6)
         .fontColor(this.palette().textSecondary)
         .maxLines(3)
         .textAlign(TextAlign.Center)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .textShadow(this.textShadow())
       Text(this.emptyAction(view))
-        .fontSize(10)
+        .fontSize(SCREEN_SAVER_FONT.L7)
         .fontColor('#4A9EFF')
         .maxLines(1)
         .onClick((): void => {
@@ -418,7 +442,7 @@ export struct ScreensaverCountdownCard {
           })
           if (this.viewData.state === 'offline' && !this.isOneByOne()) {
             Text(`离线 · 缓存 ${screenSaverFormatStamp(this.viewData.fetchedAt)}`)
-              .fontSize(8)
+              .fontSize(SCREEN_SAVER_FONT.L7)
               .fontColor(this.palette().textTertiary)
               .maxLines(1)
               .textAlign(TextAlign.Center)

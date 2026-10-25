@@ -28,6 +28,7 @@
 import { common } from '@kit.AbilityKit';
 import { screenSaverTicker, ScreenSaverTickListener } from '../common/Ticker';
 import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
+import { SCREEN_SAVER_FONT, screenSaverFontAtLeast } from '../common/CardTypography';
 import { screenSaverResolveDensity } from './CardCatalog';
 import {
   screenSaverFormatDate,
@@ -244,7 +245,7 @@ export struct ScreensaverClockCard {
     const mainFont = this.fitFont(width, height * timeHeightShare, charCount, 0.62) * factor;
     const plan: ScreenSaverClockFontPlan = {
       mainFont: this.clampFont(mainFont, SCREEN_SAVER_CLOCK_MIN_FONT, SCREEN_SAVER_CLOCK_MAX_FONT, widthLimit),
-      subFont: this.clampFont(mainFont * subRatio, 10, 28, widthLimit),
+      subFont: this.clampFont(mainFont * subRatio, SCREEN_SAVER_FONT.L7, SCREEN_SAVER_FONT.L1, widthLimit),
       mainText: mainText,
       periodText: periodText,
       subText: subText,
@@ -326,7 +327,7 @@ export struct ScreensaverClockCard {
         if (this.periodText.length > 0) {
           // AM/PM 贴着时间底部对齐（VerticalAlign.Bottom），像真实时钟
           Text(this.periodText)
-            .fontSize(Math.max(10, this.mainFont * 0.28))
+            .fontSize(screenSaverFontAtLeast(Math.round(this.mainFont * 0.28)))
             .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textShadow(this.textShadow())

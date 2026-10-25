@@ -42,6 +42,7 @@ import { screenSaverMotionDuration, SCREEN_SAVER_MOTION_PHOTO_FADE_MS } from '..
 import { SCREEN_SAVER_METRICS } from '../common/ScreenSaverStyle';
 import { screenSaverContainSize, ScreenSaverFitBars } from '../common/ContentFit';
 import { screenSaverCardPalette, screenSaverTextShadow, ScreensaverCardPalette } from '../common/CardTheme';
+import { SCREEN_SAVER_FONT } from '../common/CardTypography';
 import { screenSaverResolveDensity } from './CardCatalog';
 import {
   SCREEN_SAVER_PHOTO_MIN_INTERVAL_SEC,
@@ -772,18 +773,18 @@ export struct ScreensaverPhotoCard {
       }
       if (this.placeholderVisible && !this.deniedVisible && !this.emptyVisible && this.density() !== 'minimal') {
         Text('加载中…')
-          .fontSize(12)
+          .fontSize(SCREEN_SAVER_FONT.L5)
           .fontColor(this.palette().textTertiary)
           .textShadow(this.textShadow())
       }
       if (this.emptyVisible && this.density() !== 'minimal') {
         Column({ space: 4 }) {
           Text('还没有照片')
-            .fontSize(13)
+            .fontSize(SCREEN_SAVER_FONT.L4)
             .fontColor(this.palette().textSecondary)
             .textShadow(this.textShadow())
           Text('在配置中选择相册来源')
-            .fontSize(11)
+            .fontSize(SCREEN_SAVER_FONT.L5)
             .fontColor(this.palette().textTertiary)
             .textShadow(this.textShadow())
         }
@@ -791,14 +792,14 @@ export struct ScreensaverPhotoCard {
       if (this.deniedVisible && this.density() !== 'minimal') {
         Column({ space: 6 }) {
           Text('无相册访问权限')
-            .fontSize(13)
+            .fontSize(SCREEN_SAVER_FONT.L4)
             .fontColor(this.palette().textSecondary)
             .textShadow(this.textShadow())
           // 「去开启」按钮只在编辑态显示（播放态不可交互，保持纯净）
           if (this.cardMode === 'edit') {
             Column() {
               Text('去开启')
-                .fontSize(12)
+                .fontSize(SCREEN_SAVER_FONT.L5)
                 .fontColor('#4A9EFF')
             }
             .constraintSize({ minWidth: 40, minHeight: 40 })
@@ -815,7 +816,7 @@ export struct ScreensaverPhotoCard {
       if (this.infoText.length > 0) {
         Row() {
           Text(this.infoText)
-            .fontSize(this.density() === 'compact' ? 9 : 10)
+            .fontSize(this.density() === 'compact' ? SCREEN_SAVER_FONT.L7 : SCREEN_SAVER_FONT.L6)
             .fontColor(this.palette().textSecondary)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
