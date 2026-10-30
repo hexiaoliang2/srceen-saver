@@ -19,7 +19,7 @@
  *
  * 【格子大小自适应】
  * cellSize(): 按卡片宽高和周数算出每个格子的边长（宽约束/高约束取小），
- * 夹在 [4, 14]，任何尺寸的卡都摆得下且不模糊。
+ * 夹在 [2, 14]，任何尺寸的卡（含 52 周窄预览）都摆得下且不裁切。
  *
  * 【日期处理的防御】
  * GitHub 返回 'YYYY-MM-DD' 字符串。parseDateMs 手动拆解而不是直接 new Date(str)：
@@ -44,6 +44,10 @@ const GIT_WEEKDAY_COUNT: number = 7;
 const GIT_CELL_GAP: number = 3;
 // 紧凑档自动压缩的展示周数上限（格子太小时再多周也看不清）。
 const GIT_COMPACT_MAX_WEEKS: number = 12;
+// 格子边长上下限（vp）：52 周在小尺寸预览里也必须放得下，否则最近的
+// 彩色格子会被裁到卡片外，看起来像「没有数据」。
+const GIT_CELL_MIN: number = 2;
+const GIT_CELL_MAX: number = 14;
 // 极简档迷你条：展示最近几天 + 条的最大高度（vp）。
 const GIT_MINIMAL_DAYS: number = 7;
 const GIT_MINIMAL_BAR_MAX: number = 26;
@@ -251,8 +255,9 @@ export struct ScreensaverGitCard {
 
   /**
    * 计算格子边长：宽约束（去掉内边距和列间距后除以周数）与
-   * 高约束（去掉标题/页脚高度后除以 7 行）取较小值，夹在 [4, 14]。
-   * 太小看不清、太大一屏放不下，4/14 是经验值。
+   * 高约束（去掉标题/页脚高度后除以 7 行）取较小值，夹在 [2, 14]。
+   * 下限取 2 而不是 4：52 周在窄卡片（如设置面板 120vp 预览）里若按 4
+   * 计算会横向溢出，最近的彩色格子被裁掉，表现为整块空白。
    */
   private cellSize(): number {
     const weeks = this.buildWeeks();
@@ -262,11 +267,11 @@ export struct ScreensaverGitCard {
     const byWidth = (width - 20 - (weekCount - 1) * GIT_CELL_GAP) / weekCount;
     const byHeight = (height - 46 - (GIT_WEEKDAY_COUNT - 1) * GIT_CELL_GAP) / GIT_WEEKDAY_COUNT;
     const size = Math.min(byWidth, byHeight);
-    if (size < 4) {
-      return 4;
+    if (size < GIT_CELL_MIN) {
+      return GIT_CELL_MIN;
     }
-    if (size > 14) {
-      return 14;
+    if (size > GIT_CELL_MAX) {
+      return GIT_CELL_MAX;
     }
     return size;
   }
